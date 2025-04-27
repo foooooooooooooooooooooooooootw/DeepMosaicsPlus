@@ -33,6 +33,7 @@ def run(args,mode = 0):
 
 def video2image(videopath, imagepath, fps=0, start_time='00:00:00', last_time='00:00:00'):
     args = ['ffmpeg']
+    args += ['-hwaccel', 'cuda']
     if last_time != '00:00:00':
         args += ['-ss', start_time]
         args += ['-t', last_time]
