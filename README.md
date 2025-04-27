@@ -1,12 +1,11 @@
 <div align="center">
   <img src="./imgs/logo.png" width="250"><br><br>
-  <img src="https://badgen.net/github/stars/hypox64/deepmosaics?icon=github&color=4ab8a1">&emsp;<img src="https://badgen.net/github/forks/hypox64/deepmosaics?icon=github&color=4ab8a1">&emsp;<a href="https://github.com/HypoX64/DeepMosaics/releases"><img src=https://img.shields.io/github/downloads/hypox64/deepmosaics/total></a>&emsp;<a href="https://github.com/HypoX64/DeepMosaics/releases"><img src=https://img.shields.io/github/v/release/hypox64/DeepMosaics></a>&emsp;<img src=https://img.shields.io/github/license/hypox64/deepmosaics>
 </div>
 
 # DeepMosaics
 
 **English | [中文](./README_CN.md)**<br>
-You can use it to automatically remove the mosaics in images and videos, or add mosaics to them.<br>This project is based on "semantic segmentation" and "Image-to-Image Translation".<br>Try it at this [website](http://118.89.27.46:5000/)!<br>
+You can use it to automatically remove the mosaics in images and videos, or add mosaics to them.<br>
 
 ### Examples
 
@@ -42,7 +41,7 @@ You can simply try to remove the mosaic on the **face** at this [website](http:/
 
 ### Pre-built binary package
 
-No GUI yet, run the command under "Example"
+No GUI yet, execution is commandline only - run the command under "[Example](####Example)"
 
 ### Run From Source
 
@@ -75,9 +74,9 @@ You can download pre_trained models and put them into './pretrained_models'.<br>
 In order to add/remove mosaic, there must be a model file `mosaic_position.pth` at `./pretrained_models/mosaic/mosaic_position.pth`
 
 #### Example
-
+```
 python deepmosaic.py --media_path "path/to/video.mp4" --model_path "/path/to/model.pth" --gpu_id 0
-
+```
 #### More Parameters
 
 If you want to test other images or videos, please refer to this file.<br>
