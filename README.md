@@ -52,7 +52,7 @@ No GUI yet, run the command under "Example"
 - Python 3.6+
 - [ffmpeg 3.4.6](http://ffmpeg.org/)
 - [Pytorch 1.0+](https://pytorch.org/)
-- #### [CUDA v11.0.1] (https://developer.nvidia.com/cuda-11.0-update1-download-archive)
+- #### [CUDA v11.0.1](https://developer.nvidia.com/cuda-11.0-update1-download-archive) (I tried newer versions it doesn't work)
 - Nvidia GPU only for now; I plan on optimizing for CPU and AMD GPU
 
 #### Dependencies
