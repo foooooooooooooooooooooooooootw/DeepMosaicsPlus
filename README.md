@@ -2,7 +2,7 @@
   <img src="./imgs/logo.png" width="250"><br><br>
 </div>
 
-# DeepMosaics
+# DeepMosaicsPlus
 
 **English | [中文](./README_CN.md)**<br>
 You can use it to automatically remove the mosaics in images and videos, or add mosaics to them.<br>
@@ -31,9 +31,15 @@ You can use it to automatically remove the mosaics in images and videos, or add 
 
 An interesting example:[Ricardo Milos to cat](https://www.bilibili.com/video/BV1Q7411W7n6)
 
-## Run DeepMosaics
+### TODO
 
-You can either run DeepMosaics via a pre-built binary package, or from source.<br>
+- Fix bugs relating to non-english letters and spaces in filenames
+- Increase performance further by parallelizing/async I/O, saturating GPU with batches etc. 
+- Create GUI
+
+## Run DeepMosaicsPlus
+
+You can run DeepMosaicsPlus from source. Executable might come in the future.<br>
 
 ### Try it on web
 
@@ -58,7 +64,7 @@ No GUI yet, execution is commandline only - run the command under "[Example](###
 <br>
  I changed it to use Directml because the CUDA version I made worked on my 2060 but not my 1070ti and I just gave up. 
  <br> <br>
- With directml it can be used on AMD GPUs as well. With my 7800XT at 75% clock speed processing for step 2 has sped up by 6x (1h -> 10 mins). It has been hardcoded to use directml (your gpu) and will only fallback to cpu if something fails. I tweaked ffmpeg args so it uses DirectX 11 for hardware acceleration. 
+ With directml it can be used on AMD GPUs as well. With my 7800XT at 75% clock speed processing for step 2 has sped up by 6x (1h -> 10 mins). It has been hardcoded to use directml (your gpu) and will only fallback to cpu if something fails. I tweaked ffmpeg args so it uses DirectX 11 for hardware acceleration. There is no need to use the gpu-id argument because if torch_directml is installed on your system it will autodetect any available directml devices. 
  <br> <br>
  The nature of directml means this is only available for windows. 
 <br> <br>
@@ -70,8 +76,8 @@ This code depends on opencv-python, torchvision available via pip install.
 #### Clone this repo
 
 ```bash
-git clone https://github.com/HypoX64/DeepMosaics.git
-cd DeepMosaics
+git clone https://github.com/foooooooooooooooooooooooooootw/DeepMosaicsPlus.git
+cd DeepMosaicsPlus
 ```
 
 #### Get Pre-Trained Models
