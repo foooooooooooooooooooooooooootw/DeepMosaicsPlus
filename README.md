@@ -57,11 +57,12 @@ No GUI yet, execution is commandline only - run the command under "[Example](###
 #### Modification Note:
 <br>
  I changed it to use Directml because the CUDA version I made worked on my 2060 but not my 1070ti and I just gave up. 
- <br>
+ <br> <br>
  With directml it can be used on AMD GPUs as well. With my 7800XT at 75% clock speed processing for step 2 has sped up by 6x (1h -> 10 mins). It has been hardcoded to use directml (your gpu) and will only fallback to cpu if something fails. I tweaked ffmpeg args so it uses DirectX 11 for hardware acceleration. 
- <br>
+ <br> <br>
  The nature of directml means this is only available for windows. 
-<br>
+<br> <br>
+
 #### Dependencies
 
 This code depends on opencv-python, torchvision available via pip install.
