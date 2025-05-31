@@ -47,13 +47,21 @@ No GUI yet, execution is commandline only - run the command under "[Example](###
 
 #### Prerequisites
 
-- Linux, Mac OS, Windows
+- Windows
 - Python 3.6+
 - [ffmpeg 3.4.6](http://ffmpeg.org/)
 - [Pytorch 1.0+](https://pytorch.org/)
-- #### [CUDA v11.0.1](https://developer.nvidia.com/cuda-11.0-update1-download-archive) (I tried newer versions it doesn't work)
-- Nvidia GPU only for now; I plan on optimizing for CPU and AMD GPU
+- torch_directml
+- Any GPU. <br>
 
+#### Modification Note:
+<br>
+ I changed it to use Directml because the CUDA version I made worked on my 2060 but not my 1070ti and I just gave up. 
+ <br>
+ With directml it can be used on AMD GPUs as well. With my 7800XT at 75% clock speed processing for step 2 has sped up by 6x (1h -> 10 mins). It has been hardcoded to use directml (your gpu) and will only fallback to cpu if something fails. I tweaked ffmpeg args so it uses DirectX 11 for hardware acceleration. 
+ <br>
+ The nature of directml means this is only available for windows. 
+<br>
 #### Dependencies
 
 This code depends on opencv-python, torchvision available via pip install.
@@ -75,7 +83,7 @@ In order to add/remove mosaic, there must be a model file `mosaic_position.pth` 
 
 #### Example
 ```
-python deepmosaic.py --media_path "path/to/video.mp4" --model_path "/path/to/model.pth" --gpu_id 0
+python deepmosaic.py --media_path "path/to/video.mp4" --model_path "/path/to/model.pth"
 ```
 #### More Parameters
 

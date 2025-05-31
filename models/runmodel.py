@@ -9,20 +9,28 @@ import numpy as np
 
 def run_segment(img,net,size = 360,gpu_id = '-1'):
     img = impro.resize(img,size)
-    img = data.im2tensor(img,gpu_id = gpu_id, bgr2rgb = False, is0_1 = True)
+    img = data.im2tensor(img, gpu_id = gpu_id, bgr2rgb = False, is0_1 = True)
+    # Make sure the tensor is on the same device as the model
+    img = img.to(next(net.parameters()).device).float()
     mask = net(img)
     mask = data.tensor2im(mask, gray=True, is0_1 = True)
     return mask
 
-def run_pix2pix(img,net,opt):
+def run_pix2pix(img, net, opt):
     if opt.netG == 'HD':
-        img = impro.resize(img,512)
+        img = impro.resize(img, 512)
     else:
-        img = impro.resize(img,128)
-    img = data.im2tensor(img,gpu_id=opt.gpu_id)
-    img_fake = net(img)
+        img = impro.resize(img, 128)
+
+    device = next(net.parameters()).device
+    img_tensor = data.im2tensor(img, device=device)
+
+    with torch.no_grad():
+        img_fake = net(img_tensor)
+
     img_fake = data.tensor2im(img_fake)
     return img_fake
+
 
 def traditional_cleaner(img,opt):
     h,w = img.shape[:2]

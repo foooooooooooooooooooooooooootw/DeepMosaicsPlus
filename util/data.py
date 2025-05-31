@@ -46,28 +46,30 @@ def tensor2im(image_tensor, gray=False, rgb2bgr = True ,is0_1 = False, batch_ind
     return image_numpy.astype(np.uint8)
 
 
-def im2tensor(image_numpy, gray=False,bgr2rgb = True, reshape = True, gpu_id = '-1',is0_1 = False):
+def im2tensor(image_numpy, gray=False, bgr2rgb=True, reshape=True, device=None, is0_1=False, **kwargs):
     if gray:
         h, w = image_numpy.shape
-        image_numpy = (image_numpy/255.0-0.5)/0.5
+        image_numpy = (image_numpy / 255.0 - 0.5) / 0.5
         image_tensor = torch.from_numpy(image_numpy).float()
         if reshape:
-            image_tensor = image_tensor.reshape(1,1,h,w)
+            image_tensor = image_tensor.reshape(1, 1, h, w)
     else:
-        h, w ,ch = image_numpy.shape
+        h, w, ch = image_numpy.shape
         if bgr2rgb:
-            image_numpy = image_numpy[...,::-1]-np.zeros_like(image_numpy)
+            image_numpy = image_numpy[..., ::-1] - np.zeros_like(image_numpy)
         if is0_1:
-            image_numpy = image_numpy/255.0
+            image_numpy = image_numpy / 255.0
         else:
-            image_numpy = (image_numpy/255.0-0.5)/0.5
+            image_numpy = (image_numpy / 255.0 - 0.5) / 0.5
         image_numpy = image_numpy.transpose((2, 0, 1))
         image_tensor = torch.from_numpy(image_numpy).float()
         if reshape:
-            image_tensor = image_tensor.reshape(1,ch,h,w)
-    if gpu_id != '-1':
-        image_tensor = image_tensor.cuda()
+            image_tensor = image_tensor.reshape(1, ch, h, w)
+
+    if device is not None:
+        image_tensor = image_tensor.to(device)
     return image_tensor
+
 
 def shuffledata(data,target):
     state = np.random.get_state()
