@@ -369,8 +369,6 @@ def cleanmosaic_video_fusion(opt,netG,netM):
         t2 = time.time()
         print('\r',str(i+1)+'/'+str(length),util.get_bar(100*i/length,num=35),util.counttime(t1,t2,i+1,len(imagepaths)),end='')
     print()
-    write_pool.close()
-    show_pool.close()
     if not opt.no_preview:
         cv2.destroyAllWindows()
     print('Step:4/4 -- Convert images to video')
