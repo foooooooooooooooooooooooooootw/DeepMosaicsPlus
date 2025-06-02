@@ -14,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import asyncio
 from pathlib import Path
 
+torch.set_float32_matmul_precision('high')
+
 try:
     import torch_directml
     DIRECTML_AVAILABLE = True
@@ -95,7 +97,7 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
         
         # Load batch of images
         batch_images = []
-        with ThreadPoolExecutor(max_workers=2) as executor:  # Reduced workers
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor: 
             futures = [executor.submit(impro.imread, 
                                      os.path.join(opt.temp_dir, 'video2image', path)) 
                       for path in batch_paths]
@@ -121,9 +123,11 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
                     batch_masks.append((mask, path))
                     consecutive_errors = 0  # Reset on success
                     
-                    if not opt.no_preview:
-                        cv2.imshow('mosaic mask', mask)
-                        cv2.waitKey(1) & 0xFF
+                    if not opt.no_preview and mask is not None and mask.size > 0:
+                        if i % 2 == 0:  # Only show every other frame
+                            cv2.imshow('mosaic mask', mask)
+                            cv2.waitKey(1)
+
                         
                 except Exception as e:
                     print(f"Error processing image {path}: {e}")
@@ -220,7 +224,7 @@ def cleanmosaic_video_byframe(opt, netG, netM):
         cv2.namedWindow('clean', cv2.WINDOW_NORMAL)
 
     # Set up async writer thread and queue
-    write_queue = Queue(maxsize=8)
+    write_queue = Queue(maxsize=32)
 
     def async_writer():
         while True:
@@ -263,9 +267,10 @@ def cleanmosaic_video_byframe(opt, netG, netM):
         write_queue.put((save_path, img_result, delete_path))
 
         # Preview result and print progress
-        if not opt.no_preview:
-            cv2.imshow('clean', img_result)
-            cv2.waitKey(1) & 0xFF
+        if not opt.no_preview and mask is not None and mask.size > 0:
+            if i % 2 == 0:  # Only show every other frame
+                cv2.imshow('mosaic mask', mask)
+                cv2.waitKey(1)
         t2 = time.time()
         print('\r', f"{i+1}/{length} {util.get_bar(100*i/length, num=35)} {util.counttime(t1, t2, i+1, length)}", end='')
 
@@ -307,8 +312,8 @@ def cleanmosaic_video_fusion(opt,netG,netM):
     # clean mosaic
     print('Step:3/4 -- Clean Mosaic:')
     length = len(imagepaths)
-    write_pool = Queue(4)
-    show_pool = Queue(4)
+    write_pool = Queue(32)
+    show_pool = Queue(32)
     def write_result():
         while True:
             save_ori,imagepath,img_origin,img_fake,x,y,size = write_pool.get()
@@ -354,7 +359,7 @@ def cleanmosaic_video_fusion(opt,netG,netM):
                 
                 input_stream = np.array(input_stream).reshape(1,T,INPUT_SIZE,INPUT_SIZE,3).transpose((0,4,1,2,3))
                 input_stream = data.to_tensor(data.normalize(input_stream),gpu_id=opt.gpu_id)
-                with torch.no_grad():
+                with torch.inference_mode():
                     unmosaic_pred = netG(input_stream,previous_frame)
                 img_fake = data.tensor2im(unmosaic_pred,rgb2bgr = True)
                 previous_frame = unmosaic_pred
@@ -369,8 +374,6 @@ def cleanmosaic_video_fusion(opt,netG,netM):
         t2 = time.time()
         print('\r',str(i+1)+'/'+str(length),util.get_bar(100*i/length,num=35),util.counttime(t1,t2,i+1,len(imagepaths)),end='')
     print()
-    write_pool.close()
-    show_pool.close()
     if not opt.no_preview:
         cv2.destroyAllWindows()
     print('Step:4/4 -- Convert images to video')

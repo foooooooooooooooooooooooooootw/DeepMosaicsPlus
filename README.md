@@ -4,17 +4,12 @@
 
 # DeepMosaicsPlus
 
-**English | [中文](./README_CN.md)**<br>
-You can use it to automatically remove the mosaics in images and videos, or add mosaics to them.<br>
+**English**<br>
+You can use it to remove mosaics in images and videos.<br>
 
 ### Examples
 
 ![image](./imgs/hand.gif)
-
-|                origin                |             auto add mosaic              |             auto clean mosaic              |
-| :----------------------------------: | :--------------------------------------: | :----------------------------------------: |
-|  ![image](./imgs/example/lena.jpg)   |  ![image](./imgs/example/lena_add.jpg)   |  ![image](./imgs/example/lena_clean.jpg)   |
-| ![image](./imgs/example/youknow.png) | ![image](./imgs/example/youknow_add.png) | ![image](./imgs/example/youknow_clean.png) |
 
 - Compared with [DeepCreamPy](https://github.com/deeppomf/DeepCreamPy)
 
@@ -22,14 +17,6 @@ You can use it to automatically remove the mosaics in images and videos, or add 
 | :----------------------------------------: | :--------------------------------: | :---------------------------------------: |
 | ![image](./imgs/example/face_a_mosaic.jpg) | ![image](./imgs/example/a_dcp.png) | ![image](./imgs/example/face_a_clean.jpg) |
 | ![image](./imgs/example/face_b_mosaic.jpg) | ![image](./imgs/example/b_dcp.png) | ![image](./imgs/example/face_b_clean.jpg) |
-
-- Style Transfer
-
-|              origin              |               to Van Gogh                |                   to winter                    |
-| :------------------------------: | :--------------------------------------: | :--------------------------------------------: |
-| ![image](./imgs/example/SZU.jpg) | ![image](./imgs/example/SZU_vangogh.jpg) | ![image](./imgs/example/SZU_summer2winter.jpg) |
-
-An interesting example:[Ricardo Milos to cat](https://www.bilibili.com/video/BV1Q7411W7n6)
 
 ### TODO
 
