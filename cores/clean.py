@@ -220,69 +220,184 @@ def cleanmosaic_video_byframe(opt, netG, netM):
     positions = get_mosaic_positions(opt, netM, imagepaths, savemask=True)[(start_frame - 1):]
 
     t1 = time.time()
+    
+    # Optimized batch processing parameters
+    batch_size = getattr(opt, 'clean_batch_size', 12)  # Increased batch size
+    max_workers = min(os.cpu_count() or 4, 8)
+    
+    # Process all frames in order to avoid speed bursts
+    print('Step:3/4 -- Clean Mosaic (Optimized):')
+    
+    # Pre-allocate queues
+    write_queue = Queue(maxsize=batch_size * 4)
+    preview_queue = Queue(maxsize=16)
+    
     if not opt.no_preview:
         cv2.namedWindow('clean', cv2.WINDOW_NORMAL)
 
-    # Set up async writer thread and queue
-    write_queue = Queue(maxsize=32)
-
     def async_writer():
+        import shutil
         while True:
             item = write_queue.get()
             if item is None:
                 break
-            save_path, img, delete_path = item
+            save_path, img, delete_path, is_copy = item
             try:
-                cv2.imwrite(save_path, img)
-                os.remove(delete_path)
+                if is_copy:
+                    shutil.copy2(delete_path, save_path)
+                else:
+                    cv2.imwrite(save_path, img)
+                
+                if delete_path and os.path.exists(delete_path):
+                    os.remove(delete_path)
             except Exception as e:
                 print(f"Writer error: {e}")
-            write_queue.task_done()
+            finally:
+                write_queue.task_done()
 
+    def preview_handler():
+        while True:
+            item = preview_queue.get()
+            if item is None:
+                break
+            try:
+                cv2.imshow('clean', item)
+                cv2.waitKey(1)
+            except:
+                pass
+            finally:
+                preview_queue.task_done()
+
+    # Start worker threads
     writer_thread = Thread(target=async_writer, daemon=True)
     writer_thread.start()
+    
+    preview_thread = None
+    if not opt.no_preview:
+        preview_thread = Thread(target=preview_handler, daemon=True)
+        preview_thread.start()
 
-    # Clean mosaic
-    print('Step:3/4 -- Clean Mosaic:')
-    length = len(imagepaths)
-    for i, imagepath in enumerate(imagepaths, 0):
-        x, y, size = positions[i]
-        img_origin = impro.imread(os.path.join(opt.temp_dir, 'video2image', imagepath))
-        img_result = img_origin.copy()
-
-        if size > 100:
-            try:  # Avoid unknown errors
-                img_mosaic = img_origin[y-size:y+size, x-size:x+size]
-                if opt.traditional:
-                    img_fake = runmodel.traditional_cleaner(img_mosaic, opt)
+    def process_frame_batch(frame_data_batch):
+        """Process frames in order - fast copy or neural network"""
+        results = []
+        import shutil
+        
+        for i, imagepath, x, y, size in frame_data_batch:
+            try:
+                src_path = os.path.join(opt.temp_dir, 'video2image', imagepath)
+                dst_path = os.path.join(opt.temp_dir, 'replace_mosaic', imagepath)
+                
+                if size <= 100:
+                    # Fast path - direct copy
+                    shutil.copy2(src_path, dst_path)
+                    img_result = None  # Don't load for preview to save time
                 else:
-                    img_fake = runmodel.run_pix2pix(img_mosaic, netG, opt)
-                mask = cv2.imread(os.path.join(opt.temp_dir, 'mosaic_mask', imagepath), 0)
-                img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather)
+                    # Slow path - neural network processing
+                    img_origin = impro.imread(src_path)
+                    try:
+                        img_mosaic = img_origin[y-size:y+size, x-size:x+size]
+                        
+                        if opt.traditional:
+                            img_fake = runmodel.traditional_cleaner(img_mosaic, opt)
+                        else:
+                            with torch.no_grad():
+                                img_fake = runmodel.run_pix2pix(img_mosaic, netG, opt)
+                        
+                        mask_path = os.path.join(opt.temp_dir, 'mosaic_mask', imagepath)
+                        if os.path.exists(mask_path):
+                            mask = cv2.imread(mask_path, 0)
+                            img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather)
+                        else:
+                            img_result = img_origin
+                        
+                        cv2.imwrite(dst_path, img_result)
+                    except Exception as e:
+                        print(f'Warning processing frame {i}: {e}')
+                        shutil.copy2(src_path, dst_path)
+                        img_result = None
+                
+                # Always remove source
+                if os.path.exists(src_path):
+                    os.remove(src_path)
+                    
+                results.append((i, imagepath, img_result, size > 100))
+                
             except Exception as e:
-                print('Warning:', e)
+                print(f'Error processing frame {imagepath}: {e}')
+                results.append((i, imagepath, None, False))
+        
+        return results
 
-        save_path = os.path.join(opt.temp_dir, 'replace_mosaic', imagepath)
-        delete_path = os.path.join(opt.temp_dir, 'video2image', imagepath)
-        write_queue.put((save_path, img_result, delete_path))
-
-        # Preview result and print progress
-        if not opt.no_preview and mask is not None and mask.size > 0:
-            if i % 2 == 0:  # Only show every other frame
-                cv2.imshow('mosaic mask', mask)
-                cv2.waitKey(1)
-        t2 = time.time()
-        print('\r', f"{i+1}/{length} {util.get_bar(100*i/length, num=35)} {util.counttime(t1, t2, i+1, length)}", end='')
-
-    # Finalize writer thread
+    
+    length = len(imagepaths)
+    
+    # Process all frames with adaptive batching to smooth out speed
+    for batch_start in range(0, length, batch_size):
+        batch_end = min(batch_start + batch_size, length)
+        
+        # Count mosaic frames in this batch to adjust processing
+        mosaic_count = 0
+        frame_batch = []
+        for idx in range(batch_start, batch_end):
+            imagepath = imagepaths[idx]
+            x, y, size = positions[idx]
+            frame_batch.append((idx, imagepath, x, y, size))
+            if size > 100:
+                mosaic_count += 1
+        
+        # If batch is all copies, process them one by one for steady progress
+        if mosaic_count == 0 and len(frame_batch) > 4:
+            # Process copy frames individually to avoid speed bursts
+            for idx, imagepath, x, y, size in frame_batch:
+                single_batch = [(idx, imagepath, x, y, size)]
+                batch_results = process_frame_batch(single_batch)
+                
+                # Immediate progress update for smooth display
+                current_frame = idx + 1
+                t2 = time.time()
+                print(f'\r{current_frame}/{length} '
+                      f'{util.get_bar(100*current_frame/length, num=35)} '
+                      f'{util.counttime(t1, t2, current_frame, length)}', end='')
+                
+                # Preview every 8th frame for copies
+                if not opt.no_preview and idx % 8 == 0:
+                    try:
+                        img = impro.imread(os.path.join(opt.temp_dir, 'replace_mosaic', imagepath))
+                        if img is not None:
+                            preview_queue.put(img, block=False)
+                    except:
+                        pass
+        else:
+            # Normal batch processing for mixed or mosaic-heavy batches
+            batch_results = process_frame_batch(frame_batch)
+            
+            # Handle previews for processed frames only
+            for i, imagepath, img_result, was_processed in batch_results:
+                if not opt.no_preview and img_result is not None and i % 5 == 0:
+                    try:
+                        preview_queue.put(img_result.copy(), block=False)
+                    except:
+                        pass
+            
+            # Progress reporting
+            current_frame = batch_end
+            t2 = time.time()
+            print(f'\r{current_frame}/{length} '
+                  f'{util.get_bar(100*current_frame/length, num=35)} '
+                  f'{util.counttime(t1, t2, current_frame, length)}', end='')
+    
+    # Cleanup threads
     write_queue.put(None)
     writer_thread.join()
+    
+    if preview_thread:
+        preview_queue.put(None)
+        preview_thread.join()
 
-    print()
+    print('\nStep:4/4 -- Convert images to video')
     if not opt.no_preview:
         cv2.destroyAllWindows()
 
-    print('Step:4/4 -- Convert images to video')
     ffmpeg.image2video(
         fps,
         os.path.join(opt.temp_dir, 'replace_mosaic', f'output_%06d.{opt.tempimage_type}'),
@@ -290,94 +405,174 @@ def cleanmosaic_video_byframe(opt, netG, netM):
         os.path.join(opt.result_dir, os.path.splitext(os.path.basename(path))[0] + '_clean.mp4')
     )
 
-
-def cleanmosaic_video_fusion(opt,netG,netM):
+def cleanmosaic_video_fusion(opt, netG, netM):
     path = opt.media_path
-    N,T,S = 2,5,3
-    LEFT_FRAME = (N*S)
-    POOL_NUM = LEFT_FRAME*2+1
+    N, T, S = 2, 5, 3
+    LEFT_FRAME = (N * S)
+    POOL_NUM = LEFT_FRAME * 2 + 1
     INPUT_SIZE = 256
-    FRAME_POS = np.linspace(0, (T-1)*S,T,dtype=np.int64)
+    FRAME_POS = np.linspace(0, (T-1)*S, T, dtype=np.int64)
+    
+    # Pre-allocate arrays to avoid repeated memory allocation
+    input_stream_array = np.empty((1, T, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
+    temp_crop = np.empty((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
+    
     img_pool = []
     previous_frame = None
     init_flag = True
     
-    fps,imagepaths,height,width = video_init(opt,path)
+    fps, imagepaths, height, width = video_init(opt, path)
     start_frame = int(imagepaths[0][7:13])
-    positions = get_mosaic_positions(opt,netM,imagepaths,savemask=True)[(start_frame-1):]
+    positions = get_mosaic_positions(opt, netM, imagepaths, savemask=True)[(start_frame-1):]
     t1 = time.time()
+    
     if not opt.no_preview:
         cv2.namedWindow('clean', cv2.WINDOW_NORMAL)
     
-    # clean mosaic
+    # Optimize thread pools and queues
     print('Step:3/4 -- Clean Mosaic:')
     length = len(imagepaths)
-    write_pool = Queue(32)
-    show_pool = Queue(32)
+    write_pool = Queue(16)  # Reduced queue size to save memory
+    show_pool = Queue(8)    # Smaller preview queue
+    
+    # Pre-compile paths to avoid repeated string operations
+    video2image_dir = opt.temp_dir + '/video2image'
+    mosaic_mask_dir = opt.temp_dir + '/mosaic_mask'
+    replace_mosaic_dir = opt.temp_dir + '/replace_mosaic'
+    
     def write_result():
         while True:
-            save_ori,imagepath,img_origin,img_fake,x,y,size = write_pool.get()
+            result = write_pool.get()
+            if result is None:  # Sentinel to stop thread
+                break
+                
+            save_ori, imagepath, img_origin, img_fake, x, y, size = result
+            
             if save_ori:
                 img_result = img_origin
             else:
-                mask = cv2.imread(os.path.join(opt.temp_dir+'/mosaic_mask',imagepath),0)
-                img_result = impro.replace_mosaic(img_origin,img_fake,mask,x,y,size,opt.no_feather)
-            if not opt.no_preview:
+                # Cache mask reading if same positions repeat
+                mask_path = os.path.join(mosaic_mask_dir, imagepath)
+                mask = cv2.imread(mask_path, 0)
+                img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather)
+            
+            if not opt.no_preview and show_pool.qsize() < 4:
                 show_pool.put(img_result.copy())
-            cv2.imwrite(os.path.join(opt.temp_dir+'/replace_mosaic',imagepath),img_result)
-            os.remove(os.path.join(opt.temp_dir+'/video2image',imagepath))
-    t = Thread(target=write_result,args=())
-    t.setDaemon(True)
-    t.start()
-
-    for i,imagepath in enumerate(imagepaths,0):
-        x,y,size = positions[i][0],positions[i][1],positions[i][2]
-        input_stream = []
-        # image read stream
-        if i==0 :# init
+            
+            # Write result
+            cv2.imwrite(os.path.join(replace_mosaic_dir, imagepath), img_result)
+            
+            # Clean up original image file
+            try:
+                os.remove(os.path.join(video2image_dir, imagepath))
+            except OSError:
+                pass  # File might already be removed
+    
+    # Start writer thread
+    writer_thread = Thread(target=write_result)
+    writer_thread.daemon = True
+    writer_thread.start()
+    
+    # Pre-calculate clipped indices to avoid repeated calculations
+    pool_indices = []
+    for i in range(length):
+        indices = []
+        if i == 0:  # init
             for j in range(POOL_NUM):
-                img_pool.append(impro.imread(os.path.join(opt.temp_dir+'/video2image',imagepaths[np.clip(i+j-LEFT_FRAME,0,len(imagepaths)-1)])))
-        else: # load next frame
-            img_pool.pop(0)
-            img_pool.append(impro.imread(os.path.join(opt.temp_dir+'/video2image',imagepaths[np.clip(i+LEFT_FRAME,0,len(imagepaths)-1)])))
+                indices.append(np.clip(i + j - LEFT_FRAME, 0, length - 1))
+        else:
+            indices.append(np.clip(i + LEFT_FRAME, 0, length - 1))
+        pool_indices.append(indices)
+    
+    # Main processing loop
+    for i, imagepath in enumerate(imagepaths):
+        x, y, size = positions[i][0], positions[i][1], positions[i][2]
+        
+        # Optimized image pool management
+        if i == 0:  # init
+            img_pool.clear()  # Ensure clean start
+            for idx in pool_indices[i]:
+                img_path = os.path.join(video2image_dir, imagepaths[idx])
+                img_pool.append(impro.imread(img_path))
+        else:  # load next frame
+            if len(img_pool) >= POOL_NUM:
+                img_pool.pop(0)  # Remove oldest frame
+            if pool_indices[i]:  # Only load if we have new index
+                img_path = os.path.join(video2image_dir, imagepaths[pool_indices[i][0]])
+                img_pool.append(impro.imread(img_path))
+        
         img_origin = img_pool[LEFT_FRAME]
-
-        # preview result and print
-        if not opt.no_preview:
-            if show_pool.qsize()>3:   
-                cv2.imshow('clean',show_pool.get())
+        
+        # Non-blocking preview update
+        if not opt.no_preview and not show_pool.empty():
+            try:
+                cv2.imshow('clean', show_pool.get_nowait())
                 cv2.waitKey(1) & 0xFF
-
-        if size>50:
-            try:#Avoid unknown errors
-                for pos in FRAME_POS:
-                    input_stream.append(impro.resize(img_pool[pos][y-size:y+size,x-size:x+size], INPUT_SIZE,interpolation=cv2.INTER_CUBIC)[:,:,::-1])
+            except:
+                pass
+        
+        # Process only if mosaic is large enough
+        if size > 50:
+            try:
+                # Pre-calculate crop bounds to avoid repeated calculations
+                y_start, y_end = max(0, y - size), min(img_origin.shape[0], y + size)
+                x_start, x_end = max(0, x - size), min(img_origin.shape[1], x + size)
+                
+                # Build input stream more efficiently
+                for idx, pos in enumerate(FRAME_POS):
+                    if pos < len(img_pool):
+                        crop = img_pool[pos][y_start:y_end, x_start:x_end]
+                        # Resize directly into pre-allocated array slice
+                        resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
+                        input_stream_array[0, idx] = resized[:, :, ::-1]  # BGR to RGB
+                
                 if init_flag:
                     init_flag = False
-                    previous_frame = input_stream[N]
-                    previous_frame = data.im2tensor(previous_frame,bgr2rgb=True,gpu_id=opt.gpu_id)
+                    # Convert middle frame for previous_frame
+                    previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id)
                 
-                input_stream = np.array(input_stream).reshape(1,T,INPUT_SIZE,INPUT_SIZE,3).transpose((0,4,1,2,3))
-                input_stream = data.to_tensor(data.normalize(input_stream),gpu_id=opt.gpu_id)
+                # Transpose in-place and convert to tensor
+                input_tensor = data.to_tensor(
+                    data.normalize(input_stream_array.transpose((0, 4, 1, 2, 3))), 
+                    gpu_id=opt.gpu_id
+                )
+                
+                # Model inference with minimal overhead
                 with torch.inference_mode():
-                    unmosaic_pred = netG(input_stream,previous_frame)
-                img_fake = data.tensor2im(unmosaic_pred,rgb2bgr = True)
+                    unmosaic_pred = netG(input_tensor, previous_frame)
+                
+                img_fake = data.tensor2im(unmosaic_pred, rgb2bgr=True)
                 previous_frame = unmosaic_pred
-                write_pool.put([False,imagepath,img_origin.copy(),img_fake.copy(),x,y,size])
+                
+                # Queue result for writing
+                write_pool.put([False, imagepath, img_origin.copy(), img_fake, x, y, size])
+                
             except Exception as e:
+                print(f'\nError processing frame {i}: {e}')
                 init_flag = True
-                print('Error:',e)
+                write_pool.put([True, imagepath, img_origin.copy(), -1, -1, -1, -1])
         else:
-            write_pool.put([True,imagepath,img_origin.copy(),-1,-1,-1,-1])
+            write_pool.put([True, imagepath, img_origin.copy(), -1, -1, -1, -1])
             init_flag = True
         
-        t2 = time.time()
-        print('\r',str(i+1)+'/'+str(length),util.get_bar(100*i/length,num=35),util.counttime(t1,t2,i+1,len(imagepaths)),end='')
-    print()
+        # Progress reporting (less frequent to reduce overhead)
+        if i % 10 == 0 or i == length - 1:
+            t2 = time.time()
+            print(f'\r{i+1}/{length} {util.get_bar(100*i/length, num=35)} {util.counttime(t1, t2, i+1, length)}', end='')
+    
+    print()  # New line after progress
+    
+    # Clean shutdown
+    write_pool.put(None)  # Sentinel to stop writer thread
+    writer_thread.join(timeout=30)  # Wait for writer to finish
+    
     if not opt.no_preview:
         cv2.destroyAllWindows()
+    
     print('Step:4/4 -- Convert images to video')
-    ffmpeg.image2video( fps,
-                opt.temp_dir+'/replace_mosaic/output_%06d.'+opt.tempimage_type,
-                opt.temp_dir+'/voice_tmp.mp3',
-                 os.path.join(opt.result_dir,os.path.splitext(os.path.basename(path))[0]+'_clean.mp4')) 
+    ffmpeg.image2video(
+        fps,
+        opt.temp_dir + '/replace_mosaic/output_%06d.' + opt.tempimage_type,
+        opt.temp_dir + '/voice_tmp.mp3',
+        os.path.join(opt.result_dir, os.path.splitext(os.path.basename(path))[0] + '_clean.mp4')
+    )

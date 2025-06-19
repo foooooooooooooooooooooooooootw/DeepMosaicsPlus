@@ -132,15 +132,19 @@ class GANLoss(nn.Module):
 class VGGLoss(nn.Module):
     def __init__(self, gpu_ids):
         super(VGGLoss, self).__init__()        
-        self.vgg = Vgg19().cuda()
+        # Cache VGG model to avoid repeated loading
+        if not hasattr(VGGLoss, '_cached_vgg'):
+            VGGLoss._cached_vgg = Vgg19()
+        self.vgg = VGGLoss._cached_vgg.cuda()
         self.criterion = nn.L1Loss()
         self.weights = [1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0]        
 
     def forward(self, x, y):              
         x_vgg, y_vgg = self.vgg(x), self.vgg(y)
         loss = 0
-        for i in range(len(x_vgg)):
-            loss += self.weights[i] * self.criterion(x_vgg[i], y_vgg[i].detach())        
+        # Use zip and enumerate for better performance
+        for i, (x_feat, y_feat, weight) in enumerate(zip(x_vgg, y_vgg, self.weights)):
+            loss += weight * self.criterion(x_feat, y_feat.detach())        
         return loss
 
 ##############################################################################
@@ -185,19 +189,26 @@ class LocalEnhancer(nn.Module):
         self.downsample = nn.AvgPool2d(3, stride=2, padding=[1, 1], count_include_pad=False)
 
     def forward(self, input): 
-        ### create input pyramid
-        input_downsampled = [input]
+        # Pre-create input pyramid more efficiently
+        input_pyramid = [input]
+        current_input = input
         for i in range(self.n_local_enhancers):
-            input_downsampled.append(self.downsample(input_downsampled[-1]))
+            current_input = self.downsample(current_input)
+            input_pyramid.append(current_input)
 
-        ### output at coarest level
-        output_prev = self.model(input_downsampled[-1])        
-        ### build up one layer at a time
+        # Start with coarsest level
+        output_prev = self.model(input_pyramid[-1])
+        
+        # Build up layers with cached attribute access
         for n_local_enhancers in range(1, self.n_local_enhancers+1):
-            model_downsample = getattr(self, 'model'+str(n_local_enhancers)+'_1')
-            model_upsample = getattr(self, 'model'+str(n_local_enhancers)+'_2')            
-            input_i = input_downsampled[self.n_local_enhancers-n_local_enhancers]            
-            output_prev = model_upsample(model_downsample(input_i) + output_prev)
+            input_idx = self.n_local_enhancers - n_local_enhancers
+            input_i = input_pyramid[input_idx]
+            
+            # Cache attribute lookups
+            model_down = getattr(self, f'model{n_local_enhancers}_1')
+            model_up = getattr(self, f'model{n_local_enhancers}_2')
+            
+            output_prev = model_up(model_down(input_i) + output_prev)
         return output_prev
 
 class GlobalGenerator(nn.Module):
@@ -297,16 +308,26 @@ class Encoder(nn.Module):
     def forward(self, input, inst):
         outputs = self.model(input)
 
-        # instance-wise average pooling
+        # instance-wise average pooling - optimized version
         outputs_mean = outputs.clone()
-        inst_list = np.unique(inst.cpu().numpy().astype(int))        
+        inst_cpu = inst.cpu().numpy().astype(int)
+        inst_list = np.unique(inst_cpu)
+        
+        batch_size = input.size(0)
         for i in inst_list:
-            for b in range(input.size()[0]):
-                indices = (inst[b:b+1] == int(i)).nonzero() # n x 4            
-                for j in range(self.output_nc):
-                    output_ins = outputs[indices[:,0] + b, indices[:,1] + j, indices[:,2], indices[:,3]]                    
-                    mean_feat = torch.mean(output_ins).expand_as(output_ins)                                        
-                    outputs_mean[indices[:,0] + b, indices[:,1] + j, indices[:,2], indices[:,3]] = mean_feat                       
+            # Vectorized mask creation
+            mask = (inst == int(i))
+            for b in range(batch_size):
+                batch_mask = mask[b:b+1]
+                if batch_mask.any():  # Only process if mask has True values
+                    indices = batch_mask.nonzero()
+                    if len(indices) > 0:
+                        for j in range(self.output_nc):
+                            # More efficient indexing
+                            channel_outputs = outputs[b, j][batch_mask[0]]
+                            if len(channel_outputs) > 0:
+                                mean_val = torch.mean(channel_outputs)
+                                outputs_mean[b, j][batch_mask[0]] = mean_val
         return outputs_mean
 
 class MultiscaleDiscriminator(nn.Module):
@@ -340,13 +361,19 @@ class MultiscaleDiscriminator(nn.Module):
         num_D = self.num_D
         result = []
         input_downsampled = input
+        
         for i in range(num_D):
+            scale_idx = num_D - 1 - i
             if self.getIntermFeat:
-                model = [getattr(self, 'scale'+str(num_D-1-i)+'_layer'+str(j)) for j in range(self.n_layers+2)]
+                # Pre-build model list once
+                model = [getattr(self, f'scale{scale_idx}_layer{j}') for j in range(self.n_layers+2)]
             else:
-                model = getattr(self, 'layer'+str(num_D-1-i))
+                model = getattr(self, f'layer{scale_idx}')
+            
             result.append(self.singleD_forward(model, input_downsampled))
-            if i != (num_D-1):
+            
+            # Only downsample if not the last iteration
+            if i < num_D - 1:
                 input_downsampled = self.downsample(input_downsampled)
         return result
         

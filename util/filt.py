@@ -24,7 +24,7 @@ def less_zero(arr,num = 7):
 
 def medfilt(data,window):
     if window%2 == 0 or window < 0:
-        print('Error: the medfilt window must be even number')
+        print('Error: the medfilt window must be an odd number')
         exit(0)
     pad = int((window-1)/2)
     pad_data = np.zeros(len(data)+window-1, dtype = type(data[0]))

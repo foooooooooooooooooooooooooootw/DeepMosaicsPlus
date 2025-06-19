@@ -7,6 +7,8 @@ from util import data
 import torch
 import numpy as np
 
+torch.set_float32_matmul_precision('high')
+
 def run_segment(img,net,size = 360,gpu_id = '-1'):
     img = impro.resize(img,size)
     img = data.im2tensor(img, gpu_id = gpu_id, bgr2rgb = False, is0_1 = True)
@@ -25,7 +27,7 @@ def run_pix2pix(img, net, opt):
     device = next(net.parameters()).device
     img_tensor = data.im2tensor(img, device=device)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         img_fake = net(img_tensor)
 
     img_fake = data.tensor2im(img_fake)
@@ -76,18 +78,48 @@ def get_ROI_position(img,net,opt,keepsize=True):
     x,y,halfsize,area = impro.boundingSquare(mask, 1)
     return mask,x,y,halfsize,area
 
-def get_mosaic_position(img_origin,net_mosaic_pos,opt):
-    h,w = img_origin.shape[:2]
-    mask = run_segment(img_origin,net_mosaic_pos,size=360,gpu_id = opt.gpu_id)
-    # mask_1 = mask.copy()
-    mask = impro.mask_threshold(mask,ex_mun=int(min(h,w)/20),threshold=opt.mask_threshold)
+def get_mosaic_position(img_origin, net_mosaic_pos, opt):
+    h, w = img_origin.shape[:2]
+    
+    # Cache commonly used values
+    min_hw = min(h, w)
+    rat = min_hw / 360.0
+    ex_mun = int(min_hw / 20)
+    
+    # Run segmentation with error handling
+    try:
+        mask = run_segment(img_origin, net_mosaic_pos, size=360, gpu_id=opt.gpu_id)
+    except Exception as e:
+        print(f"Segmentation error: {e}")
+        # Return default values if segmentation fails
+        return w//2, h//2, 0, np.zeros((h, w), dtype=np.uint8)
+    
+    # Early exit if mask is empty
+    if mask is None or mask.size == 0:
+        return w//2, h//2, 0, np.zeros((h, w), dtype=np.uint8)
+    
+    # Apply threshold with cached ex_mun
+    mask = impro.mask_threshold(mask, ex_mun=ex_mun, threshold=opt.mask_threshold)
+    
+    # Find most likely ROI if needed
     if not opt.all_mosaic_area:
         mask = impro.find_mostlikely_ROI(mask)
-    x,y,size,area = impro.boundingSquare(mask,Ex_mul=opt.ex_mult)
-    #Location fix
-    rat = min(h,w)/360.0
-    x,y,size = int(rat*x),int(rat*y),int(rat*size)
-    x,y = np.clip(x, 0, w),np.clip(y, 0, h)
-    size = np.clip(size, 0, min(w-x,h-y))
-    # print(x,y,size)
-    return x,y,size,mask
+    
+    # Get bounding square
+    try:
+        x, y, size, area = impro.boundingSquare(mask, Ex_mul=opt.ex_mult)
+    except Exception as e:
+        print(f"Bounding square error: {e}")
+        return w//2, h//2, 0, mask
+    
+    # Location fix with cached ratio
+    x = int(rat * x)
+    y = int(rat * y) 
+    size = int(rat * size)
+    
+    # Efficient clipping in one step
+    x = max(0, min(x, w))
+    y = max(0, min(y, h))
+    size = max(0, min(size, min(w - x, h - y)))
+    
+    return x, y, size, mask

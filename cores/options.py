@@ -26,7 +26,7 @@ class Options():
         self.parser.add_argument('--fps', type=int, default=0,help='read and output fps, if 0-> origin')
         self.parser.add_argument('--no_preview', action='store_true', help='if specified,do not preview images when processing video. eg.(when run it on server)')
         self.parser.add_argument('--output_size', type=int, default=0,help='size of output media, if 0 -> origin')
-        self.parser.add_argument('--mask_threshold', type=int, default=64,help='Mosaic detection threshold (0~255). The smaller is it, the more likely judged as a mosaic area.')
+        self.parser.add_argument('--mask_threshold', type=int, default=48,help='Mosaic detection threshold (0~255). The smaller is it, the more likely judged as a mosaic area.')
 
         #AddMosaic
         self.parser.add_argument('--mosaic_mod', type=str, default='squa_avg',help='type of mosaic -> squa_avg | squa_random | squa_avg_circle_edge | rect_avg | random')
@@ -40,7 +40,7 @@ class Options():
         self.parser.add_argument('--tr_down', type=int, default=10, help='downsample when using traditional method,it will affect final quality')
         self.parser.add_argument('--no_feather', action='store_true', help='if specified, no edge feather and color correction, but run faster')
         self.parser.add_argument('--all_mosaic_area', action='store_true', help='if specified, find all mosaic area, else only find the largest area')
-        self.parser.add_argument('--medfilt_num', type=int, default=11,help='medfilt window of mosaic movement in the video')
+        self.parser.add_argument('--medfilt_num', type=int, default=5,help='medfilt window of mosaic movement in the video')
         self.parser.add_argument('--ex_mult', type=str, default='auto',help='mosaic area expansion')
         
         #StyleTransfer

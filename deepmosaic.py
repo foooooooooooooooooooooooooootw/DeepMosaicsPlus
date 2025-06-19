@@ -1,6 +1,8 @@
 import os
 import sys
 import traceback
+from cores import init
+
 try:
     from cores import Options,add,clean,style
     from util import util
@@ -70,6 +72,7 @@ def main():
     util.clean_tempfiles(opt, tmp_init = False)
 
 if __name__ == '__main__':
+    
     if opt.debug:
         main()
         sys.exit(0)
