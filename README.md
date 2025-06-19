@@ -22,19 +22,48 @@ You can use it to remove mosaics in images and videos.<br>
 
 - Fix bugs relating to non-english letters and spaces in filenames
 - Increase performance further by parallelizing/async I/O, saturating GPU with batches etc. 
-- Create GUI
 
 ## Run DeepMosaicsPlus
 
 You can run DeepMosaicsPlus from source. Executable might come in the future.<br>
 
-### Try it on web
+### Arguments
 
-You can simply try to remove the mosaic on the **face** at this [website](http://118.89.27.46:5000/).<br>
+#### Base arguments
+| Argument              | Type  | Default                                     | Description                                                                                        |
+| --------------------- | ----- | ------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `--debug`             | flag  | `False`                                     | Enable debug mode.                                                                                 |
+| `--gpu_id`            | `str` | `'0'`                                       | GPU ID to use; set to `-1` for CPU.                                                                |
+| `--media_path`        | `str` | `'./imgs/ruoruo.jpg'`                       | Path to input media (image or video).                                                              |
+| `-ss`, `--start_time` | `str` | `'00:00:00'`                                | Start time in the video (HH\:MM\:SS).                                                              |
+| `-t`, `--last_time`   | `str` | `'00:00:00'`                                | Duration to process; `00:00:00` means full video.                                                  |
+| `--mode`              | `str` | `'auto'`                                    | For now it's "clean" only, or at least its the only thing I optimized                              |
+| `--model_path`        | `str` | `'./clean_youknow_video.pth'`               | Path to the pretrained model.                                                                      |
+| `--result_dir`        | `str` | `'./result'`                                | Directory where results are saved.                                                                 |
+| `--temp_dir`          | `str` | `'./tmp'`                                   | Directory for temporary files.                                                                     |
+| `--tempimage_type`    | `str` | `'jpg'`                                     | Image format for temp files: `jpg` or `png`.                                                       |
+| `--netG`              | `str` | `'auto'`                                    | Network to use for `clean/style`: `auto`, `unet_128`, `unet_256`, `resnet_9blocks`, `HD`, `video`. |
+| `--fps`               | `int` | `0`                                         | Output FPS; `0` keeps original FPS.                                                                |
+| `--no_preview`        | flag  | `False`                                     | Disable preview window (useful for servers).                                                       |
+| `--output_size`       | `int` | `0`                                         | Output size; `0` preserves original resolution.                                                    |
+| `--mask_threshold`    | `int` | `48`                                        | Mosaic detection sensitivity (0–255); lower = more sensitive.                                      |
+
+#### Clean Arguments
+| Argument                       | Type  | Default  | Description                                            |
+| ------------------------------ | ----- | -------- | ------------------------------------------------------ |
+| `--mosaic_position_model_path` | `str` | `'auto'` | Path or name of model for detecting mosaic positions.  |
+| `--traditional`                | flag  | `False`  | Use traditional (non-AI) method for mosaic cleaning.   |
+| `--tr_blur`                    | `int` | `10`     | Blur kernel size for traditional cleaning.             |
+| `--tr_down`                    | `int` | `10`     | Downsampling factor for traditional cleaning.          |
+| `--no_feather`                 | flag  | `False`  | Disable edge feathering and color correction (faster). |
+| `--all_mosaic_area`            | flag  | `True`   | Find all mosaic regions instead of just the largest.   |
+| `--medfilt_num`                | `int` | `5`      | Median filter window for smoothing mosaic detection.   |
+| `--ex_mult`                    | `str` | `'auto'` | Area expansion multiplier for mosaics.                 |
+
 
 ### Pre-built binary package
 
-No GUI yet, execution is commandline only - run the command under "[Example](####Example)"
+For GUI just double click deepmosaicplusui.py or execute via commandline - run the command under "[Example](####Example)"
 
 ### Run From Source
 
@@ -77,7 +106,7 @@ In order to add/remove mosaic, there must be a model file `mosaic_position.pth` 
 
 #### Example
 ```
-python deepmosaic.py --media_path "path/to/video.mp4" --model_path "/path/to/model.pth"
+python deepmosaic.py --media_path "weenus.mkv" --model_path "clean_youknow_video.pth"
 ```
 #### More Parameters
 
