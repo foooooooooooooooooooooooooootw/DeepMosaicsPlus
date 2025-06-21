@@ -1,9 +1,12 @@
+#TODO: Image sometimes goes wavy? UI output stops at 2/4 mosaic positions, UI hangs when there are temp files detected and waits for y/n
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import os
 import subprocess
 import threading
+import queue
+import time
 
 # Set appearance mode and color theme
 ctk.set_appearance_mode("dark")  # Modes: "System" (standard), "Dark", "Light"
@@ -25,10 +28,21 @@ class DeepMosaicsUI:
 
     def cancel_process(self):
         if self.process and self.process.poll() is None:
-            self.process.terminate()
-            self.output_text.insert(tk.END, "\n🛑 Process was cancelled by the user.\n")
-            self.output_text.see(tk.END)
-            self.process = None
+            try:
+                self.process.terminate()
+                # Wait a bit for graceful termination
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()  # Force kill if doesn't terminate
+                    
+                self.output_text.insert(tk.END, "\n🛑 Process was cancelled by the user.\n")
+                self.output_text.see(tk.END)
+            except Exception as e:
+                self.output_text.insert(tk.END, f"\n❌ Error during cancellation: {e}\n")
+                self.output_text.see(tk.END)
+            finally:
+                self.process = None
         else:
             messagebox.showinfo("Info", "No running process to cancel.")
 
@@ -110,7 +124,7 @@ class DeepMosaicsUI:
         
         self.model_entry = ctk.CTkEntry(model_frame, placeholder_text="Select model file...")
         self.model_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self.model_entry.insert(0, "./")
+        self.model_entry.insert(0, "./clean_youknow_video.pth")
         model_btn = ctk.CTkButton(model_frame, text="Browse", width=80,
                                  command=self.browse_model)
         model_btn.grid(row=0, column=1)
@@ -219,7 +233,7 @@ class DeepMosaicsUI:
         current_row += 1
         
         # All Mosaic Area checkbox
-        self.all_mosaic_var = ctk.BooleanVar(value=True)  # Default: checked
+        self.all_mosaic_var = ctk.BooleanVar(value=False)
         all_mosaic_cb = ctk.CTkCheckBox(scroll_frame, text="Find All Mosaic Areas (Slower)", 
                                        variable=self.all_mosaic_var)
         all_mosaic_cb.grid(row=current_row, column=0, columnspan=2, pady=5, sticky="w")
@@ -401,6 +415,11 @@ class DeepMosaicsUI:
         
         return cmd
     
+    def update_output_text(self, text):
+        """Thread-safe method to update output text"""
+        self.output_text.insert(tk.END, text)
+        self.output_text.see(tk.END)
+    
     def run_deepmosaics(self):
         def run_in_thread():
             try:
@@ -412,46 +431,127 @@ class DeepMosaicsUI:
                 self.output_text.insert("1.0", f"🚀 Running: {command_str}\n")
                 self.output_text.insert(tk.END, "=" * 60 + "\n\n")
 
-                # Use the directory where this script is located
                 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-                # Run the command
-                self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True,
-                                        universal_newlines=True,
-                                        cwd=script_dir)  # <--- Set working directory
+                env = os.environ.copy()
+                env['PYTHONUNBUFFERED'] = '1'
 
-                for line in self.process.stdout:
-                    self.output_text.insert(tk.END, line)
-                    self.output_text.see(tk.END)
-                    self.root.update_idletasks()
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    universal_newlines=True,
+                    cwd=script_dir,
+                    env=env
+                )
 
-                self.process.wait()
-                self.process = None
+                output_queue = queue.Queue()
+                prompt_event = threading.Event()
 
-                self.output_text.insert(tk.END, "\n" + "=" * 60 + "\n")
-                if self.process.returncode == 0:
-                    self.output_text.insert(tk.END, "✅ Process completed successfully!\n")
+                def read_output():
+                    try:
+                        for line in iter(self.process.stdout.readline, ''):
+                            if line:
+                                line_lower = line.lower().strip()
+                                if ('continue' in line_lower and 'y/n' in line_lower) or \
+                                ('unfinished' in line_lower and 'continue' in line_lower and '?' in line_lower):
+                                    output_queue.put(('prompt', line))
+                                    prompt_event.set()
+                                else:
+                                    output_queue.put(('output', line))
+                    except:
+                        pass
+                    output_queue.put(('done', None))
+
+                output_thread = threading.Thread(target=read_output)
+                output_thread.daemon = True
+                output_thread.start()
+
+                time.sleep(0.1)  # Let the subprocess emit output early
+
+                while True:
+                    try:
+                        msg_type, content = output_queue.get(timeout=0.1)
+
+                        if msg_type == 'done':
+                            break
+                        elif msg_type == 'prompt':
+                            self.root.after(0, lambda text=content: self.update_output_text(text))
+                            self.root.update()
+
+                            result = messagebox.askyesno(
+                                "Continue Processing",
+                                "An unfinished process was detected. Do you want to continue it?",
+                                default='yes'
+                            )
+
+                            try:
+                                if self.process and self.process.poll() is None:
+                                    if result:
+                                        self.process.stdin.write('y\n')
+                                        response_text = "✅ User selected: Yes (continue)\n"
+                                    else:
+                                        self.process.stdin.write('n\n')
+                                        response_text = "❌ User selected: No (abort)\n"
+                                    self.process.stdin.flush()
+                                    self.root.after(0, lambda text=response_text: self.update_output_text(text))
+                            except Exception as e:
+                                error_text = f"❌ Error sending response: {e}\n"
+                                self.root.after(0, lambda text=error_text: self.update_output_text(text))
+
+                            prompt_event.clear()
+
+                        elif msg_type == 'output':
+                            self.root.after(0, lambda text=content: self.update_output_text(text))
+
+                    except queue.Empty:
+                        self.root.update_idletasks()
+                        if self.process and self.process.poll() is not None:
+                            while True:
+                                try:
+                                    msg_type, content = output_queue.get_nowait()
+                                    if msg_type in ['output', 'prompt']:
+                                        self.root.after(0, lambda text=content: self.update_output_text(text))
+                                except queue.Empty:
+                                    break
+                            break
+
+                if self.process:
+                    self.process.wait()
+                    return_code = self.process.returncode
+                    self.process = None
                 else:
-                    self.output_text.insert(tk.END, f"❌ Process failed with return code: {self.process.returncode}\n")
+                    return_code = -1
+
+                def update_final_status():
+                    self.output_text.insert(tk.END, "\n" + "=" * 60 + "\n")
+                    if return_code == 0:
+                        self.output_text.insert(tk.END, "✅ Process completed successfully!\n")
+                    else:
+                        self.output_text.insert(tk.END, f"❌ Process failed with return code: {return_code}\n")
+                    self.output_text.see(tk.END)
+
+                self.root.after(0, update_final_status)
 
             except Exception as e:
-                self.output_text.insert(tk.END, f"\n❌ Error: {str(e)}\n")
-        
-        # Validate required fields
+                error_msg = str(e)
+                self.root.after(0, lambda msg=error_msg: self.output_text.insert(tk.END, f"\n❌ Error: {msg}\n"))
+
         if not self.media_entry.get().strip():
             messagebox.showerror("Error", "Please select a media file!")
             return
-        
+
         if not self.model_entry.get().strip():
             messagebox.showerror("Error", "Please select a model file!")
             return
-        
-        # Run in separate thread to prevent UI freezing
+
         thread = threading.Thread(target=run_in_thread)
         thread.daemon = True
         thread.start()
-    
+
+
     def clear_all(self):
         # Reset all fields to default values
         self.debug_var.set(False)
@@ -463,7 +563,7 @@ class DeepMosaicsUI:
         self.duration_entry.delete(0, tk.END)
         self.duration_entry.insert(0, "00:00:00")
         self.model_entry.delete(0, tk.END)
-        self.model_entry.insert(0, "./")
+        self.model_entry.insert(0, "./clean_youknow_video.pth")
         self.result_entry.delete(0, tk.END)
         self.result_entry.insert(0, "./result")
         self.netg_var.set("auto")

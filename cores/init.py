@@ -1,5 +1,6 @@
 import os
 from util import util,ffmpeg
+import sys
 
 '''
 ---------------------Video Init---------------------
@@ -13,7 +14,9 @@ def video_init(opt,path):
     if os.path.isfile(os.path.join(opt.temp_dir,'step.json')):
         step = util.loadjson(os.path.join(opt.temp_dir,'step.json'))
         if int(step['step'])>=1:
-            choose = input('There is an unfinished video. Continue it? [y/n] ')
+            sys.stdout.write("There is an unfinished video. Continue it? [y/n]\n")
+            sys.stdout.flush()
+            choose = sys.stdin.readline().strip()
             if choose.lower() =='yes' or choose.lower() == 'y':
                 imagepaths = os.listdir(opt.temp_dir+'/video2image')
                 imagepaths.sort()
