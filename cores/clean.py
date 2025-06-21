@@ -25,20 +25,17 @@ except ImportError:
     print("DirectML not available, using CUDA/CPU")
 
 def setup_device(opt):
-    """Setup optimal device for processing"""
-    if DIRECTML_AVAILABLE:
-        try:
-            device = torch_directml.device()
-            device_type = 'directml'
-            print(f"Using DirectML device: {device}")
-            return device, device_type
-        except Exception as e:
-            print(f"DirectML initialization failed: {e}, falling back to CUDA/CPU")
+    if torch.cuda.is_available():
+        opt.device = torch.device('cuda')
+        print(f"Using CUDA device: {torch.cuda.get_device_name(opt.device)}")
+    elif DIRECTML_AVAILABLE:
+        opt.device = torch_directml.device()
+        print(f"Using DirectML device: {opt.device}")
     else:
-        device = torch.device('cpu')
-        device_type = 'cpu'
+        opt.device = torch.device('cpu')
         print("Using CPU device")
-    return device, device_type
+    return opt.device, str(opt.device)
+
 
 '''
 ---------------------Clean Mosaic---------------------
@@ -529,7 +526,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
                 if init_flag:
                     init_flag = False
                     # Convert middle frame for previous_frame
-                    previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id)
+                    previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id, device=opt.device)
                 
                 # Transpose in-place and convert to tensor
                 input_tensor = data.to_tensor(

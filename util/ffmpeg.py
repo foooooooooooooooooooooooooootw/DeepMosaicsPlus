@@ -6,8 +6,24 @@ import threading
 from tqdm import tqdm
 import time
 import re
+import torch
 
-# ffmpeg 3.4.6
+hwaccel = None
+
+try:
+    import torch_directml
+    DIRECTML_AVAILABLE = True
+    print("DirectML available for acceleration")
+except ImportError:
+    DIRECTML_AVAILABLE = False
+
+try:
+    if torch.cuda.is_available():
+        hwaccel = 'cuda'
+    elif DIRECTML_AVAILABLE:
+        hwaccel = 'd3d11va'
+except ImportError:
+    hwaccel = None
 
 def args2cmd(args):
     cmd = ''
@@ -35,7 +51,8 @@ def run(args,mode = 0):
 
 def video2image(videopath, imagepath, fps=0, start_time='00:00:00', last_time='00:00:00'):
     args = ['ffmpeg']
-    args += ['-hwaccel', 'd3d11va']
+    if hwaccel != None:
+        args += ['-hwaccel', hwaccel]
     if last_time != '00:00:00':
         args += ['-ss', start_time]
         args += ['-t', last_time]
