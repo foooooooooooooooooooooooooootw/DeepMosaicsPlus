@@ -73,21 +73,22 @@ For GUI just double click deepmosaicplusui.py or execute via commandline - run t
 - Python 3.6+
 - [ffmpeg 3.4.6](http://ffmpeg.org/)
 - [Pytorch 1.0+](https://pytorch.org/)
-- torch_directml
+- torch_directml (for AMD GPUs)
+- CUDA (for Nvidia)
 - Any GPU. <br>
 
 #### Modification Note:
 <br>
- I changed it to use Directml because the CUDA version I made worked on my 2060 but not my 1070ti and I just gave up. 
+ I changed it to use directml so it can be used on AMD GPUs. CUDA is still available for Nvidia.
  <br> <br>
- With directml it can be used on AMD GPUs as well. With my 7800XT at 75% clock speed processing for step 2 has sped up by 6x (1h -> 10 mins). It has been hardcoded to use directml (your gpu) and will only fallback to cpu if something fails. I tweaked ffmpeg args so it uses DirectX 11 for hardware acceleration. There is no need to use the gpu-id argument because if torch_directml is installed on your system it will autodetect any available directml devices. 
+ With directml it can be used on AMD GPUs as well. With my 7800XT at 75% clock speed processing for step 2 has sped up by 6x (1h -> 10 mins). It has been hardcoded to use directml (your gpu) and will only fallback to cpu if something fails. I tweaked ffmpeg args so it uses DirectX 11 for hardware acceleration if AMD and CUDA for Nvidia. There is no need to use the gpu-id argument because if torch_directml is installed on your system it will autodetect any available directml devices. 
  <br> <br>
  The nature of directml means this is only available for windows. 
 <br> <br>
 
 #### Dependencies
 
-This code depends on opencv-python, torchvision available via pip install.
+This code depends on opencv-python, torchvision available via pip install. customtkinter is also needed for the UI.
 
 #### Clone this repo
 
@@ -102,7 +103,7 @@ You can download pre_trained models and put them into './pretrained_models'.<br>
 [[Google Drive]](https://drive.google.com/open?id=1LTERcN33McoiztYEwBxMuRjjgxh4DEPs) [[百度云,提取码1x0a]](https://pan.baidu.com/s/10rN3U3zd5TmfGpO_PEShqQ)<br>
 [[Introduction to pre-trained models]](./docs/pre-trained_models_introduction.md)<br>
 
-In order to add/remove mosaic, there must be a model file `mosaic_position.pth` at `./pretrained_models/mosaic/mosaic_position.pth`
+In order to remove mosaic, there must be a model file `mosaic_position.pth` & clean mosaic pth at the same directory as the deepmosaic.py.
 
 #### Example
 ```
