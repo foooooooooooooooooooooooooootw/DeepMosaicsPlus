@@ -24,17 +24,25 @@ except ImportError:
     DIRECTML_AVAILABLE = False
     print("DirectML not available, using CUDA/CPU")
 
+device_chosen = None
+
 def setup_device(opt):
     if torch.cuda.is_available():
         opt.device = torch.device('cuda')
+        opt.gpu_id = '0'  # Set gpu_id for CUDA
+        device_chosen = 'cuda'
         print(f"Using CUDA device: {torch.cuda.get_device_name(opt.device)}")
     elif DIRECTML_AVAILABLE:
         opt.device = torch_directml.device()
+        opt.gpu_id = 'directml'  # Set custom identifier for DirectML
+        device_chosen = 'directml'
         print(f"Using DirectML device: {opt.device}")
     else:
         opt.device = torch.device('cpu')
+        opt.gpu_id = '-1'  # CPU identifier
+        device_chosen = 'cpu'
         print("Using CPU device")
-    return opt.device, str(opt.device)
+    return opt.device, device_chosen
 
 
 '''
@@ -298,6 +306,9 @@ def cleanmosaic_video_byframe(opt, netG, netM):
                             img_fake = runmodel.traditional_cleaner(img_mosaic, opt)
                         else:
                             with torch.no_grad():
+                                # Ensure netG is on correct device
+                                if hasattr(opt, 'device'):
+                                    netG = netG.to(opt.device)
                                 img_fake = runmodel.run_pix2pix(img_mosaic, netG, opt)
                         
                         mask_path = os.path.join(opt.temp_dir, 'mosaic_mask', imagepath)
@@ -525,13 +536,17 @@ def cleanmosaic_video_fusion(opt, netG, netM):
                 
                 if init_flag:
                     init_flag = False
-                    # Convert middle frame for previous_frame
-                    previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id, device=opt.device)
-                
+                    # Convert middle frame for previous_frame - handle device consistently
+                    if hasattr(opt, 'device'):
+                        previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, device=opt.device)
+                    else:
+                        previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id)
+
                 # Transpose in-place and convert to tensor
                 input_tensor = data.to_tensor(
                     data.normalize(input_stream_array.transpose((0, 4, 1, 2, 3))), 
-                    gpu_id=opt.gpu_id
+                    gpu_id=opt.gpu_id,
+                    device=getattr(opt, 'device', None)
                 )
                 
                 # Model inference with minimal overhead
