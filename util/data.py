@@ -68,15 +68,19 @@ def im2tensor(image_numpy, gray=False, bgr2rgb=True, reshape=True, device=None, 
         if reshape:
             image_tensor = image_tensor.reshape(1, ch, h, w)
 
-    # Handle device placement consistently
+    # Handle device placement with DirectML safety
     if device is not None:
-        image_tensor = image_tensor.to(device)
+        if 'directml' in str(device):
+            # For DirectML, ensure contiguous tensor and proper format
+            image_tensor = image_tensor.contiguous()
+            image_tensor = image_tensor.to(device)
+        else:
+            image_tensor = image_tensor.to(device)
     elif gpu_id != '-1':
         if torch.cuda.is_available():
             image_tensor = image_tensor.cuda()
     
     return image_tensor
-
 
 def shuffledata(data,target):
     state = np.random.get_state()

@@ -24,26 +24,27 @@ except ImportError:
     DIRECTML_AVAILABLE = False
     print("DirectML not available, using CUDA/CPU")
 
-device_chosen = None
-
 def setup_device(opt):
+    """Setup optimal device for processing"""
     if torch.cuda.is_available():
-        opt.device = torch.device('cuda')
-        opt.gpu_id = '0'  # Set gpu_id for CUDA
-        device_chosen = 'cuda'
-        print(f"Using CUDA device: {torch.cuda.get_device_name(opt.device)}")
+        device = torch.device("cuda")
+        device_type = 'cuda'
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        return device, device_type
+        
     elif DIRECTML_AVAILABLE:
-        opt.device = torch_directml.device()
-        opt.gpu_id = 'directml'  # Set custom identifier for DirectML
-        device_chosen = 'directml'
-        print(f"Using DirectML device: {opt.device}")
+        try:
+            device = torch_directml.device()
+            device_type = 'directml'
+            print(f"Using DirectML device: {device}")
+            return device, device_type
+        except Exception as e:
+            print(f"DirectML initialization failed: {e}, falling back to CUDA/CPU")
     else:
-        opt.device = torch.device('cpu')
-        opt.gpu_id = '-1'  # CPU identifier
-        device_chosen = 'cpu'
+        device = torch.device('cpu')
+        device_type = 'cpu'
         print("Using CPU device")
-    return opt.device, device_chosen
-
+    return device, device_type
 
 '''
 ---------------------Clean Mosaic---------------------
@@ -123,17 +124,21 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
         for i, (img, path) in enumerate(zip(batch_images, batch_paths)):
             if img is not None:
                 try:
-                    x, y, size, mask = runmodel.get_mosaic_position(img, netM, opt)
+                    mask, x, y, size = runmodel.get_mosaic_position(img, netM, opt)  # Note: get_mosaic_position returns mask first
                     batch_positions.append([x, y, size])
-                    batch_masks.append((mask, path))
+                    if mask is not None:
+                        batch_masks.append((mask, path))
                     consecutive_errors = 0  # Reset on success
                     
-                    if not opt.no_preview and mask is not None and mask.size > 0:
+                    # Fixed preview code - check if mask exists and is valid
+                    if not opt.no_preview and mask is not None and isinstance(mask, np.ndarray) and mask.size > 0:
                         if i % 2 == 0:  # Only show every other frame
-                            cv2.imshow('mosaic mask', mask)
-                            cv2.waitKey(1)
-
-                        
+                            try:
+                                cv2.imshow('mosaic mask', mask)
+                                cv2.waitKey(1)
+                            except Exception as preview_error:
+                                print(f"Preview error for {path}: {preview_error}")
+                                
                 except Exception as e:
                     print(f"Error processing image {path}: {e}")
                     batch_positions.append([0, 0, 0])
@@ -306,9 +311,6 @@ def cleanmosaic_video_byframe(opt, netG, netM):
                             img_fake = runmodel.traditional_cleaner(img_mosaic, opt)
                         else:
                             with torch.no_grad():
-                                # Ensure netG is on correct device
-                                if hasattr(opt, 'device'):
-                                    netG = netG.to(opt.device)
                                 img_fake = runmodel.run_pix2pix(img_mosaic, netG, opt)
                         
                         mask_path = os.path.join(opt.temp_dir, 'mosaic_mask', imagepath)
@@ -536,17 +538,13 @@ def cleanmosaic_video_fusion(opt, netG, netM):
                 
                 if init_flag:
                     init_flag = False
-                    # Convert middle frame for previous_frame - handle device consistently
-                    if hasattr(opt, 'device'):
-                        previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, device=opt.device)
-                    else:
-                        previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id)
-
+                    # Convert middle frame for previous_frame
+                    previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id)
+                
                 # Transpose in-place and convert to tensor
                 input_tensor = data.to_tensor(
                     data.normalize(input_stream_array.transpose((0, 4, 1, 2, 3))), 
-                    gpu_id=opt.gpu_id,
-                    device=getattr(opt, 'device', None)
+                    gpu_id=opt.gpu_id
                 )
                 
                 # Model inference with minimal overhead

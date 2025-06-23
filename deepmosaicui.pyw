@@ -53,7 +53,7 @@ class DeepMosaicsUI:
         main_frame.grid_columnconfigure(0, weight=1)
         
         # Title
-        title_label = ctk.CTkLabel(main_frame, text="DeepMosaics Configuration", 
+        title_label = ctk.CTkLabel(main_frame, text="DeepMosaicsPlus UI", 
                                   font=ctk.CTkFont(size=24, weight="bold"))
         title_label.grid(row=0, column=0, pady=(20, 30), sticky="ew")
         

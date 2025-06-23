@@ -152,13 +152,10 @@ def boundingSquare(mask,Ex_mul):
     point1=np.array([x+size,y+size])
 
     h, w = mask.shape[:2]
-    if size*Ex_mul > min(h, w):
-        size = min(h, w)
-        halfsize = int(min(h, w)/2)
-    else:
-        size = Ex_mul*size
-        halfsize = int(size/2)
-        size = halfsize*2
+    size = int(size * Ex_mul)
+    halfsize = int(size / 1.5)
+    size = halfsize * 2
+    
     point0 = center - halfsize
     point1 = center + halfsize
     if point0[0]<0:
@@ -192,30 +189,55 @@ def mask_area(mask):
         area = 0
     return area
 
-def replace_mosaic(img_origin,img_fake,mask,x,y,size,no_feather):
-    img_fake = cv2.resize(img_fake,(size*2,size*2),interpolation=cv2.INTER_CUBIC)
+
+def replace_mosaic(img_origin, img_fake, mask, x, y, size, no_feather):
+    h, w = img_origin.shape[:2]
+
+    # Calculate original bounds (what we want to replace)
+    orig_x0 = x - size
+    orig_y0 = y - size
+    orig_x1 = x + size
+    orig_y1 = y + size
+    
+    # Calculate clipped bounds (what fits in the image)
+    clipped_x0 = max(0, orig_x0)
+    clipped_y0 = max(0, orig_y0)
+    clipped_x1 = min(w, orig_x1)
+    clipped_y1 = min(h, orig_y1)
+
+    clipped_w = clipped_x1 - clipped_x0
+    clipped_h = clipped_y1 - clipped_y0
+
+    # Simply resize img_fake to match the clipped region directly
+    img_fake_resized = cv2.resize(img_fake, (clipped_w, clipped_h), interpolation=cv2.INTER_CUBIC)
+
     if no_feather:
-        img_origin[y-size:y+size,x-size:x+size]=img_fake
+        img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1] = img_fake_resized
         return img_origin
     else:
-        # #color correction
-        # RGB_origin = img_origin[y-size:y+size,x-size:x+size].mean(0).mean(0)
-        # RGB_fake = img_fake.mean(0).mean(0)
-        # for i in range(3):img_fake[:,:,i] = np.clip(img_fake[:,:,i]+RGB_origin[i]-RGB_fake[i],0,255)
-        #eclosion
-        eclosion_num = int(size/10)+2
+        # Color correction (optional)
+        # RGB_origin = img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1].mean(0).mean(0)
+        # RGB_fake = img_fake_resized.mean(0).mean(0)
+        # for i in range(3):
+        #     img_fake_resized[:,:,i] = np.clip(img_fake_resized[:,:,i]+RGB_origin[i]-RGB_fake[i],0,255)
+        
+        # Eclosion (feathering)
+        eclosion_num = int(size/10) + 2
 
-        mask_crop = cv2.resize(mask,(img_origin.shape[1],img_origin.shape[0]))[y-size:y+size,x-size:x+size]
+        # Resize mask to match original image and crop the same region
+        mask_resized = cv2.resize(mask, (w, h))
+        mask_crop = mask_resized[clipped_y0:clipped_y1, clipped_x0:clipped_x1]
         mask_crop = ch_one2three(mask_crop)
 
-        mask_crop = (cv2.blur(mask_crop, (eclosion_num, eclosion_num)))
-        mask_crop = mask_crop/255.0
+        mask_crop = cv2.blur(mask_crop, (eclosion_num, eclosion_num))
+        mask_crop = mask_crop / 255.0
 
-        img_crop = img_origin[y-size:y+size,x-size:x+size]
-        img_origin[y-size:y+size,x-size:x+size] = np.clip((img_crop*(1-mask_crop)+img_fake*mask_crop),0,255).astype('uint8')
+        img_crop = img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1]
+        img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1] = np.clip(
+            (img_crop * (1 - mask_crop) + img_fake_resized * mask_crop), 0, 255
+        ).astype('uint8')
         
         return img_origin
-
 
 def Q_lapulase(resImg):
     '''
