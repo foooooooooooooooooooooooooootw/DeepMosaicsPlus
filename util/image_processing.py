@@ -192,6 +192,19 @@ def mask_area(mask):
 
 def replace_mosaic(img_origin, img_fake, mask, x, y, size, no_feather):
     h, w = img_origin.shape[:2]
+    
+    #validation
+    if mask is None or mask.size == 0 or mask.shape[0] == 0 or mask.shape[1] == 0:
+        print(f"Warning: Invalid mask (shape: {mask.shape if mask is not None else None}), returning original")
+        return img_origin
+    
+    if img_fake is None or img_fake.size == 0:
+        print("Warning: Invalid img_fake, returning original")
+        return img_origin
+    
+    if size <= 0:
+        print(f"Warning: Invalid size: {size}, returning original")
+        return img_origin
 
     # Calculate original bounds (what we want to replace)
     orig_x0 = x - size

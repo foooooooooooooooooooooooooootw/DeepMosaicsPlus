@@ -26,10 +26,13 @@ except ImportError:
     hwaccel = None
 
 def args2cmd(args):
-    cmd = ''
+    quoted_args = []
     for arg in args:
-        cmd += (arg+' ')
-    return cmd
+        if ' ' in arg or '[' in arg or ']' in arg:
+            quoted_args.append(f'"{arg}"')
+        else:
+            quoted_args.append(arg)
+    return ' '.join(quoted_args)
 
 def run(args,mode = 0):
 
@@ -56,11 +59,23 @@ def video2image(videopath, imagepath, fps=0, start_time='00:00:00', last_time='0
     if last_time != '00:00:00':
         args += ['-ss', start_time]
         args += ['-t', last_time]
-    args += ['-i', '"'+videopath+'"']
+    args += ['-i', videopath]
     if fps != 0:
         args += ['-r', str(fps)]
-    args += ['-f', 'image2','-q:v','-0',imagepath]
+    args += ['-f', 'image2','-q:v','-0', imagepath]
     run(args)
+
+def video2voice(videopath, voicepath, start_time='00:00:00', last_time='00:00:00'):
+    import subprocess
+    
+    cmd = ['ffmpeg', '-y', '-i', videopath]
+    
+    if last_time != '00:00:00':
+        cmd += ['-ss', start_time, '-t', last_time]
+    
+    cmd += ['-vn', '-acodec', 'libmp3lame', '-b:a', '320k', voicepath]
+    
+    subprocess.run(cmd, check=True)
 
 def get_duration(video_path):
     cmd = [
@@ -241,51 +256,130 @@ def run_ffmpeg_segment_with_progress(args):
         raise RuntimeError(f"ffmpeg segment {part_num} failed")
     segments_done.value += 1
 
-def video2voice(videopath, voicepath, start_time='00:00:00', last_time='00:00:00'):
-    args = ['ffmpeg', '-i', '"'+videopath+'"','-async 1 -f mp3','-b:a 320k']
-    if last_time != '00:00:00':
-        args += ['-ss', start_time]
-        args += ['-t', last_time]
-    args += [voicepath]
-    run(args)
-
-def image2video(fps,imagepath,voicepath,videopath):
-    os.system('ffmpeg -y -r '+str(fps)+' -i '+imagepath+' -vcodec libx264 '+os.path.split(voicepath)[0]+'/video_tmp.mp4')
+def image2video(fps, imagepath, voicepath, videopath):
+    import subprocess
+    
+    video_tmp = os.path.join(os.path.split(voicepath)[0], 'video_tmp.mp4')
+    
+    # create video from images
+    cmd1 = [
+        'ffmpeg', '-y',
+        '-r', str(fps),
+        '-i', imagepath,
+        '-vcodec', 'libx264',
+        video_tmp
+    ]
+    subprocess.run(cmd1, check=True)
+    
+    # merge with audio
     if os.path.exists(voicepath):
-        os.system('ffmpeg -i '+os.path.split(voicepath)[0]+'/video_tmp.mp4'+' -i "'+voicepath+'" -vcodec copy -acodec aac '+videopath)
+        cmd2 = [
+            'ffmpeg', '-y',
+            '-i', video_tmp,
+            '-i', voicepath,
+            '-vcodec', 'copy',
+            '-acodec', 'aac',
+            videopath
+        ]
+        subprocess.run(cmd2, check=True)
     else:
-        os.system('ffmpeg -i '+os.path.split(voicepath)[0]+'/video_tmp.mp4 '+videopath)
+        cmd2 = [
+            'ffmpeg', '-y',
+            '-i', video_tmp,
+            videopath
+        ]
+        subprocess.run(cmd2, check=True)
 
 def get_video_infos(videopath):
-    args =  ['ffprobe -v quiet -print_format json -show_format -show_streams', '-i', '"'+videopath+'"']
-    out_string = run(args,mode=1)
-    infos = json.loads(out_string)
+    import subprocess
+    import json
+    
+    # Use subprocess with list (proper quoting)
+    cmd = [
+        'ffprobe',
+        '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_format',
+        '-show_streams',
+        '-i', videopath
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {result.stderr}")
+    
+    if not result.stdout.strip():
+        raise RuntimeError(f"ffprobe returned empty output for {videopath}")
+    
+    infos = json.loads(result.stdout)
+    
     try:
         fps = eval(infos['streams'][0]['avg_frame_rate'])
         endtime = float(infos['format']['duration'])
         width = int(infos['streams'][0]['width'])
         height = int(infos['streams'][0]['height'])
     except Exception as e:
-        fps = eval(infos['streams'][1]['r_frame_rate'])
-        endtime = float(infos['format']['duration'])
-        width = int(infos['streams'][1]['width'])
-        height = int(infos['streams'][1]['height'])
+        try:
+            fps = eval(infos['streams'][1]['r_frame_rate'])
+            endtime = float(infos['format']['duration'])
+            width = int(infos['streams'][1]['width'])
+            height = int(infos['streams'][1]['height'])
+        except Exception as e2:
+            raise RuntimeError(f"Could not extract video info: {e}, {e2}")
 
-    return fps,endtime,height,width
+    return fps, endtime, height, width
 
-def cut_video(in_path,start_time,last_time,out_path,vcodec='h265'):
+def cut_video(in_path, start_time, last_time, out_path, vcodec='h265'):
+    import subprocess
+    
     if vcodec == 'copy':
-        os.system('ffmpeg -ss '+start_time+' -t '+last_time+' -i "'+in_path+'" -vcodec copy -acodec copy '+out_path)
+        cmd = [
+            'ffmpeg',
+            '-ss', start_time,
+            '-t', last_time,
+            '-i', in_path,
+            '-vcodec', 'copy',
+            '-acodec', 'copy',
+            out_path
+        ]
     elif vcodec == 'h264':    
-        os.system('ffmpeg -ss '+start_time+' -t '+last_time+' -i "'+in_path+'" -vcodec libx264 -b 12M '+out_path)
+        cmd = [
+            'ffmpeg',
+            '-ss', start_time,
+            '-t', last_time,
+            '-i', in_path,
+            '-vcodec', 'libx264',
+            '-b:v', '12M',
+            out_path
+        ]
     elif vcodec == 'h265':
-        os.system('ffmpeg -ss '+start_time+' -t '+last_time+' -i "'+in_path+'" -vcodec libx265 -b 12M '+out_path)
+        cmd = [
+            'ffmpeg',
+            '-ss', start_time,
+            '-t', last_time,
+            '-i', in_path,
+            '-vcodec', 'libx265',
+            '-b:v', '12M',
+            out_path
+        ]
+    
+    subprocess.run(cmd, check=True)
 
-def continuous_screenshot(videopath,savedir,fps):
+def continuous_screenshot(videopath, savedir, fps):
     '''
     videopath: input video path
     savedir:   images will save here
     fps:       save how many images per second
     '''
+    import subprocess
     videoname = os.path.splitext(os.path.basename(videopath))[0]
-    os.system('ffmpeg -i "'+videopath+'" -vf fps='+str(fps)+' -q:v -0 '+savedir+'/'+videoname+'_%06d.jpg')
+    
+    cmd = [
+        'ffmpeg',
+        '-i', videopath,
+        '-vf', f'fps={fps}',
+        '-q:v', '1',
+        os.path.join(savedir, f'{videoname}_%06d.jpg')
+    ]
+    subprocess.run(cmd, check=True)

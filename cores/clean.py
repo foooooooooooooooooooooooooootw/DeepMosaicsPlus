@@ -463,8 +463,20 @@ def cleanmosaic_video_fusion(opt, netG, netM):
             else:
                 # Cache mask reading if same positions repeat
                 mask_path = os.path.join(mosaic_mask_dir, imagepath)
-                mask = cv2.imread(mask_path, 0)
-                img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather)
+                
+                #VALIDATION HERE
+                if not os.path.exists(mask_path):
+                    print(f"\nWarning: Mask file not found for {imagepath}, using original image")
+                    img_result = img_origin
+                else:
+                    mask = cv2.imread(mask_path, 0)
+                    
+                    # Validate mask is not None or empty
+                    if mask is None or mask.size == 0:
+                        print(f"\nWarning: Invalid mask for {imagepath}, using original image")
+                        img_result = img_origin
+                    else:
+                        img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather)
             
             if not opt.no_preview and show_pool.qsize() < 4:
                 show_pool.put(img_result.copy())
