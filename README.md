@@ -5,7 +5,7 @@
 # DeepMosaicsPlus
 
 **English**<br>
-You can use it to remove mosaics in images and videos.<br>
+You can use it to remove mosaics in images and videos with any GPU, not just NVIDIA.<br>
 
 ### Examples
 
@@ -21,6 +21,7 @@ You can use it to remove mosaics in images and videos.<br>
 ### TODO
 
 - ~~Fix bugs relating to non-english letters and spaces in filenames~~
+- Auto detect dependencies and install if missing
 - Increase performance further by parallelizing/async I/O, saturating GPU with batches etc. 
 
 ## Run DeepMosaicsPlus
@@ -28,6 +29,8 @@ You can use it to remove mosaics in images and videos.<br>
 You can run DeepMosaicsPlus from source. Executable might come in the future.<br>
 
 ### Arguments
+
+Arguments are only needed if running through CLI.
 
 #### Base arguments
 | Argument              | Type  | Default                                     | Description                                                                                        |
@@ -63,7 +66,7 @@ You can run DeepMosaicsPlus from source. Executable might come in the future.<br
 
 ### Pre-built binary package
 
-For GUI just double click deepmosaicplusui.py or execute via commandline - run the command under "[Example](####Example)"
+For GUI just double click deepmosaicplusui.pyw or execute via commandline - run the command under "[Example](####Example)". It's easiest to just use the GUI since all the default values are set hand tuned by myself. Only thing you need to select is the media source. 
 
 ### Run From Source
 
@@ -88,7 +91,7 @@ For GUI just double click deepmosaicplusui.py or execute via commandline - run t
 
 #### Dependencies
 
-This code depends on opencv-python, torchvision available via pip install. customtkinter is also needed for the UI.
+This code depends on opencv-python, torchvision available via pip install. customtkinter is also needed for the UI. I plan on making the pyw auto check on startup and install it if dependencies are missing. 
 
 #### Clone this repo
 
@@ -103,7 +106,7 @@ You can download pre_trained models and put them into './pretrained_models'.<br>
 [[Google Drive]](https://drive.google.com/open?id=1LTERcN33McoiztYEwBxMuRjjgxh4DEPs) [[百度云,提取码1x0a]](https://pan.baidu.com/s/10rN3U3zd5TmfGpO_PEShqQ)<br>
 [[Introduction to pre-trained models]](./docs/pre-trained_models_introduction.md)<br>
 
-In order to remove mosaic, there must be a model file `mosaic_position.pth` & clean mosaic pth at the same directory as the deepmosaic.py.
+In order to remove mosaic, there must be a model file `mosaic_position.pth` & clean mosaic pth at the same directory as the deepmosaic.pyw. This is included in the zip file. 
 
 #### Example
 ```
@@ -116,10 +119,10 @@ If you want to test other images or videos, please refer to this file.<br>
 
 ## Training With Your Own Dataset
 
-If you want to train with your own dataset, please refer to [training_with_your_own_dataset.md](./docs/training_with_your_own_dataset.md)
+If you want to train with your own dataset, please refer to [training_with_your_own_dataset.md](./docs/training_with_your_own_dataset.md) I believe this is the bottleneck since the default model is very good but can be refined further. 
 
 ## Acknowledgements
 
 This code borrows heavily from [[pytorch-CycleGAN-and-pix2pix]](https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix) [[Pytorch-UNet]](https://github.com/milesial/Pytorch-UNet) [[pix2pixHD]](https://github.com/NVIDIA/pix2pixHD) [[BiSeNet]](https://github.com/ooooverflow/BiSeNet) [[DFDNet]](https://github.com/csxmli2016/DFDNet) [[GFRNet_pytorch_new]](https://github.com/sonack/GFRNet_pytorch_new).
 
-#### This codebase was also forked from [[DeepMosaics]](https://github.com/HypoX64/DeepMosaics) and optimized since I noticed it didn't use much of my CPU and GPU :) I plan on optimizing it further but this is a start.
+#### This codebase was also forked from [[DeepMosaics]](https://github.com/HypoX64/DeepMosaics) and optimized since I noticed it didn't use much of my CPU and GPU :) As an AMD GPU user I noticed there don't seem to be any options for me since most utilize CUDA. I plan on optimizing it further but this is a start.
