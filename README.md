@@ -20,7 +20,7 @@ You can use it to remove mosaics in images and videos.<br>
 
 ### TODO
 
-- Fix bugs relating to non-english letters and spaces in filenames
+- ~~Fix bugs relating to non-english letters and spaces in filenames~~
 - Increase performance further by parallelizing/async I/O, saturating GPU with batches etc. 
 
 ## Run DeepMosaicsPlus
