@@ -190,7 +190,10 @@ def mask_area(mask):
     return area
 
 
-def replace_mosaic(img_origin, img_fake, mask, x, y, size, no_feather):
+def replace_mosaic(img_origin, img_fake, mask, x, y, size, no_feather,
+                   luma_sharpen_amount=0.0,
+                   bilateral_sharpen_amount=0.0,
+                   freq_inject_amount=0.0):
     h, w = img_origin.shape[:2]
     
     #validation
@@ -221,8 +224,19 @@ def replace_mosaic(img_origin, img_fake, mask, x, y, size, no_feather):
     clipped_w = clipped_x1 - clipped_x0
     clipped_h = clipped_y1 - clipped_y0
 
+    # Capture original mosaic patch before overwriting (needed for freq_inject)
+    img_mosaic_patch = img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1].copy()
+
     # Simply resize img_fake to match the clipped region directly
     img_fake_resized = cv2.resize(img_fake, (clipped_w, clipped_h), interpolation=cv2.INTER_CUBIC)
+
+    # Post-processing pipeline: freq_inject -> bilateral -> luma USM
+    if freq_inject_amount > 0:
+        img_fake_resized = freq_inject(img_fake_resized, img_mosaic_patch, amount=freq_inject_amount)
+    if bilateral_sharpen_amount > 0:
+        img_fake_resized = bilateral_sharpen(img_fake_resized, amount=bilateral_sharpen_amount)
+    if luma_sharpen_amount > 0:
+        img_fake_resized = luma_sharpen(img_fake_resized, amount=luma_sharpen_amount)
 
     if no_feather:
         img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1] = img_fake_resized
@@ -286,3 +300,51 @@ def splice(imgs,splice_shape):
                 cnt += 1
     return output
 
+def luma_sharpen(img_bgr, amount=1.0, radius=3, threshold=8):
+    """Unsharp mask on luma (Y) channel only — avoids colour fringing."""
+    if img_bgr is None or img_bgr.size == 0:
+        return img_bgr
+    ycrcb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb)
+    y = ycrcb[:, :, 0]
+    ksize = max(3, int(radius) * 2 + 1)
+    blurred = cv2.GaussianBlur(y, (ksize, ksize), 0)
+    residual = y.astype(np.float32) - blurred.astype(np.float32)
+    mask_t = (np.abs(residual) > threshold).astype(np.float32)
+    sharp_f = (1.0 + amount) * y.astype(np.float32) - amount * blurred.astype(np.float32)
+    result_f = mask_t * sharp_f + (1.0 - mask_t) * y.astype(np.float32)
+    ycrcb[:, :, 0] = np.clip(result_f, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+
+
+def bilateral_sharpen(img_bgr, amount=1.0):
+    """Edge-preserving sharpening via bilateral filter residual on luma.
+    Less haloing than Gaussian USM — works well on soft network output."""
+    if img_bgr is None or img_bgr.size == 0:
+        return img_bgr
+    ycrcb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb)
+    y = ycrcb[:, :, 0].astype(np.float32)
+    smooth = cv2.bilateralFilter(ycrcb[:, :, 0], d=9,
+                                  sigmaColor=75, sigmaSpace=75).astype(np.float32)
+    sharp_f = (1.0 + amount) * y - amount * smooth
+    ycrcb[:, :, 0] = np.clip(sharp_f, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+
+
+def freq_inject(img_fake, img_mosaic, amount=0.3, radius=3):
+    """Inject high-frequency edges from the original mosaic into the cleaned patch.
+
+    The mosaic has wrong colour but sharp edges (from the original frame).
+    Extracting the HF band from the mosaic luma and blending it onto the
+    cleaned patch recovers perceived sharpness without colour artefacts.
+    """
+    if img_fake is None or img_mosaic is None:
+        return img_fake
+    if img_fake.shape != img_mosaic.shape:
+        img_mosaic = cv2.resize(img_mosaic, (img_fake.shape[1], img_fake.shape[0]))
+    y_fake = cv2.cvtColor(img_fake,   cv2.COLOR_BGR2YCrCb)[:, :, 0].astype(np.float32)
+    y_mos  = cv2.cvtColor(img_mosaic, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    ksize  = max(3, int(radius) * 2 + 1)
+    hf_mos = y_mos - cv2.GaussianBlur(y_mos, (ksize, ksize), 0).astype(np.float32)
+    ycrcb_out = cv2.cvtColor(img_fake, cv2.COLOR_BGR2YCrCb)
+    ycrcb_out[:, :, 0] = np.clip(y_fake + amount * hf_mos, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(ycrcb_out, cv2.COLOR_YCrCb2BGR)

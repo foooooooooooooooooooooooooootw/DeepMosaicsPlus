@@ -13,6 +13,8 @@
 
 ---
 
+https://github.com/user-attachments/assets/c2deeb1f-4566-408b-bdb9-71b3605c5c1e
+
 ## ✨ What's New in Plus
 
 This is an optimized fork of the original DeepMosaics project with significant performance improvements:
@@ -111,8 +113,11 @@ cd DeepMosaicsPlus
 ```
 
 ### 2. Install Dependencies
+
+You can use the new install_script.py to install dependencies. If you want to do it manually then here - but the pip install provided below installs both new and old UI dependencies
+
 ```bash
-pip install torch torchvision opencv-python customtkinter
+pip install torch torchvision opencv-python customtkinter pyqt6
 ```
 
 **For AMD GPUs:**
@@ -233,9 +238,7 @@ Want to train on custom datasets? Check out the [training guide](./docs/training
 
 ## 📝 Roadmap
 
-- [ ] Auto detect dependencies and install if missing
-- [ ] Add batch processing for multiple files
-- [ ] GPU workload saturation improvements
+- [ ] Add new output formats for encoding (HEVC, AV1, etc)
 
 ---
 

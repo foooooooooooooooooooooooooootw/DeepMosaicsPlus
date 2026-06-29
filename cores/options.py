@@ -39,7 +39,28 @@ class Options():
         self.parser.add_argument('--tr_blur', type=int, default=10, help='ksize of blur when using traditional method, it will affect final quality')
         self.parser.add_argument('--tr_down', type=int, default=10, help='downsample when using traditional method,it will affect final quality')
         self.parser.add_argument('--no_feather', action='store_true', help='if specified, no edge feather and color correction, but run faster')
+        self.parser.add_argument('--keep_frames', action='store_true', help='if specified, do not delete source frames from video2image dir during cleaning (useful for UI seeking)')
+        self.parser.add_argument('--encode_crf', type=int, default=18, help='CRF quality for output video encode (0=lossless, 51=worst, default 18)')
+        self.parser.add_argument('--decode_qv', type=int, default=1, help='JPEG quality for extracted frames (1=best, 31=worst, default 1)')
+        self.parser.add_argument('--luma_sharpen', action='store_true',
+            help='apply luma-channel unsharp-mask to cleaned region')
+        self.parser.add_argument('--luma_sharpen_amount', type=float, default=1.0,
+            help='luma sharpening strength (0.5=mild, 1.0=normal, 2.0=strong)')
+        self.parser.add_argument('--bilateral_sharpen', action='store_true',
+            help='edge-preserving bilateral sharpening on cleaned region')
+        self.parser.add_argument('--bilateral_sharpen_amount', type=float, default=0.5,
+            help='bilateral sharpening strength (0.2=subtle, 0.5=moderate, 1.0=strong)')
+        self.parser.add_argument('--freq_inject', action='store_true',
+            help='inject high-frequency edges from original mosaic into cleaned patch')
+        self.parser.add_argument('--freq_inject_amount', type=float, default=0.3,
+            help='frequency injection blend strength (0.1=subtle, 0.3=moderate, 0.6=strong)')
         self.parser.add_argument('--all_mosaic_area', action='store_true', help='if specified, find all mosaic area, else only find the largest area')
+        self.parser.add_argument('--min_mosaic_area', type=int, default=300,
+            help='minimum connected component area (pixels) to keep in mosaic mask. '
+                 'Lower values detect smaller mosaic regions. Default 300.')
+        self.parser.add_argument('--min_mosaic_size', type=int, default=100,
+            help='minimum bounding-box half-size (pixels) to attempt cleaning. '
+                 'Lower values process smaller detected regions. Default 100.')
         self.parser.add_argument('--medfilt_num', type=int, default=5,help='medfilt window of mosaic movement in the video')
         self.parser.add_argument('--ex_mult', type=str, default='auto',help='mosaic area expansion')
         

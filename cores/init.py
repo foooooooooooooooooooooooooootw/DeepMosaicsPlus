@@ -1,34 +1,43 @@
 import os
-from util import util,ffmpeg
+from util import util, ffmpeg
 import sys
 
 '''
 ---------------------Video Init---------------------
 '''
-def video_init(opt,path):
-    fps,endtime,height,width = ffmpeg.get_video_infos(path)
-    if opt.fps !=0:
+def video_init(opt, path):
+    # Create a hardlink with a plain ASCII name so ffmpeg never sees
+    # brackets, Japanese, or other characters it mishandles.
+    with ffmpeg.safe_input_path(path, opt.temp_dir) as safe_path:
+        return _video_init_impl(opt, safe_path)
+
+def _video_init_impl(opt, path):
+    fps, endtime, height, width = ffmpeg.get_video_infos(path)
+    if opt.fps != 0:
         fps = opt.fps
 
     # resume
-    if os.path.isfile(os.path.join(opt.temp_dir,'step.json')):
-        step = util.loadjson(os.path.join(opt.temp_dir,'step.json'))
-        if int(step['step'])>=1:
+    if os.path.isfile(os.path.join(opt.temp_dir, 'step.json')):
+        step = util.loadjson(os.path.join(opt.temp_dir, 'step.json'))
+        if int(step['step']) >= 1:
             sys.stdout.write("There is an unfinished video. Continue it? [y/n]\n")
             sys.stdout.flush()
             choose = sys.stdin.readline().strip()
-            if choose.lower() =='yes' or choose.lower() == 'y':
-                imagepaths = os.listdir(opt.temp_dir+'/video2image')
+            if choose.lower() in ('yes', 'y'):
+                imagepaths = os.listdir(opt.temp_dir + '/video2image')
                 imagepaths.sort()
-                return fps,imagepaths,height,width
-    
+                return fps, imagepaths, height, width
+
     print('Step:1/4 -- Convert video to images')
     util.file_init(opt)
-    ffmpeg.video2voice(path,opt.temp_dir+'/voice_tmp.mp3',opt.start_time,opt.last_time)
-    ffmpeg.video2image_parallel(path,opt.temp_dir+'/video2image/output_%06d.'+opt.tempimage_type,fps,opt.start_time,opt.last_time,segments=8)
-    imagepaths = os.listdir(opt.temp_dir+'/video2image')
+    ffmpeg.video2voice(path, opt.temp_dir + '/voice_tmp.mp3', opt.start_time, opt.last_time)
+    ffmpeg.video2image_parallel(
+        path,
+        opt.temp_dir + '/video2image/output_%06d.' + opt.tempimage_type,
+        fps, opt.start_time, opt.last_time, segments=8,
+        qv=getattr(opt, 'decode_qv', 1))
+    imagepaths = os.listdir(opt.temp_dir + '/video2image')
     imagepaths.sort()
-    step = {'step':2,'frame':0}
-    util.savejson(os.path.join(opt.temp_dir,'step.json'),step)
-
-    return fps,imagepaths,height,width
+    step = {'step': 2, 'frame': 0}
+    util.savejson(os.path.join(opt.temp_dir, 'step.json'), step)
+    return fps, imagepaths, height, width

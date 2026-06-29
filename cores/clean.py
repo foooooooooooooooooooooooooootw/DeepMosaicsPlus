@@ -89,33 +89,43 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
     consecutive_errors = 0
     max_consecutive_errors = 10
     
-    # Process in batches
-    for batch_start in range(0, len(imagepaths), batch_size):
+    import queue as _queue
+    PREFETCH = 3
+    prefetch_q = _queue.Queue(maxsize=PREFETCH)
+
+    def _image_loader():
+        for b_start in range(0, len(imagepaths), batch_size):
+            b_end = min(b_start + batch_size, len(imagepaths))
+            batch_paths = imagepaths[b_start:b_end]
+            loaded = []
+            with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, len(batch_paths))) as ex:
+                futs = [ex.submit(impro.imread,
+                                  os.path.join(opt.temp_dir, 'video2image', p))
+                        for p in batch_paths]
+                for fut in futs:
+                    try:
+                        loaded.append(fut.result(timeout=15))
+                    except Exception as e:
+                        print(f"Error loading image: {e}")
+                        loaded.append(None)
+            prefetch_q.put((b_start, b_end, batch_paths, loaded))
+        prefetch_q.put(None)
+
+    loader_thread = Thread(target=_image_loader, daemon=True)
+    loader_thread.start()
+
+    while True:
+        item = prefetch_q.get()
+        if item is None:
+            break
+        batch_start, batch_end, batch_paths, batch_images = item
+
         if consecutive_errors >= max_consecutive_errors:
             print(f"\nToo many consecutive errors in position detection, using CPU")
             device = torch.device('cpu')
             device_type = 'cpu'
             netM = netM.cpu()
             consecutive_errors = 0
-        
-        batch_end = min(batch_start + batch_size, len(imagepaths))
-        batch_paths = imagepaths[batch_start:batch_end]
-        
-        # Load batch of images
-        batch_images = []
-        with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor: 
-            futures = [executor.submit(impro.imread, 
-                                     os.path.join(opt.temp_dir, 'video2image', path)) 
-                      for path in batch_paths]
-            
-            for future in futures:
-                try:
-                    img = future.result(timeout=15)  # Increased timeout
-                    batch_images.append(img)
-                except Exception as e:
-                    print(f"Error loading image: {e}")
-                    batch_images.append(None)
-                    consecutive_errors += 1
         
         # Process batch through network
         batch_positions = []
@@ -200,13 +210,13 @@ def cleanmosaic_img(opt,netG,netM):
     x,y,size,mask = runmodel.get_mosaic_position(img_origin,netM,opt)
     #cv2.imwrite('./mask/'+os.path.basename(path), mask)
     img_result = img_origin.copy()
-    if size > 100 :
+    if size > getattr(opt, 'min_mosaic_size', 100):
         img_mosaic = img_origin[y-size:y+size,x-size:x+size]
         if opt.traditional:
             img_fake = runmodel.traditional_cleaner(img_mosaic,opt)
         else:
             img_fake = runmodel.run_pix2pix(img_mosaic,netG,opt)
-        img_result = impro.replace_mosaic(img_origin,img_fake,mask,x,y,size,opt.no_feather)
+        img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather, luma_sharpen_amount=getattr(opt,"luma_sharpen_amount",0.0) if getattr(opt,"luma_sharpen",False) else 0.0, bilateral_sharpen_amount=getattr(opt,"bilateral_sharpen_amount",0.0) if getattr(opt,"bilateral_sharpen",False) else 0.0, freq_inject_amount=getattr(opt,"freq_inject_amount",0.0) if getattr(opt,"freq_inject",False) else 0.0)
     else:
         print('Do not find mosaic')
     impro.imwrite(os.path.join(opt.result_dir,os.path.splitext(os.path.basename(path))[0]+'_clean.jpg'),img_result)
@@ -214,13 +224,13 @@ def cleanmosaic_img(opt,netG,netM):
 def cleanmosaic_img_server(opt,img_origin,netG,netM):
     x,y,size,mask = runmodel.get_mosaic_position(img_origin,netM,opt)
     img_result = img_origin.copy()
-    if size > 100 :
+    if size > getattr(opt, 'min_mosaic_size', 100):
         img_mosaic = img_origin[y-size:y+size,x-size:x+size]
         if opt.traditional:
             img_fake = runmodel.traditional_cleaner(img_mosaic,opt)
         else:
             img_fake = runmodel.run_pix2pix(img_mosaic,netG,opt)
-        img_result = impro.replace_mosaic(img_origin,img_fake,mask,x,y,size,opt.no_feather)
+        img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather, luma_sharpen_amount=getattr(opt,"luma_sharpen_amount",0.0) if getattr(opt,"luma_sharpen",False) else 0.0, bilateral_sharpen_amount=getattr(opt,"bilateral_sharpen_amount",0.0) if getattr(opt,"bilateral_sharpen",False) else 0.0, freq_inject_amount=getattr(opt,"freq_inject_amount",0.0) if getattr(opt,"freq_inject",False) else 0.0)
     return img_result
 
 def cleanmosaic_video_byframe(opt, netG, netM):
@@ -258,7 +268,7 @@ def cleanmosaic_video_byframe(opt, netG, netM):
                 else:
                     cv2.imwrite(save_path, img)
                 
-                if delete_path and os.path.exists(delete_path):
+                if delete_path and os.path.exists(delete_path) and not getattr(opt, 'keep_frames', False):
                     os.remove(delete_path)
             except Exception as e:
                 print(f"Writer error: {e}")
@@ -297,7 +307,7 @@ def cleanmosaic_video_byframe(opt, netG, netM):
                 src_path = os.path.join(opt.temp_dir, 'video2image', imagepath)
                 dst_path = os.path.join(opt.temp_dir, 'replace_mosaic', imagepath)
                 
-                if size <= 100:
+                if size <= getattr(opt, 'min_mosaic_size', 100):
                     # Fast path - direct copy
                     shutil.copy2(src_path, dst_path)
                     img_result = None  # Don't load for preview to save time
@@ -316,7 +326,7 @@ def cleanmosaic_video_byframe(opt, netG, netM):
                         mask_path = os.path.join(opt.temp_dir, 'mosaic_mask', imagepath)
                         if os.path.exists(mask_path):
                             mask = cv2.imread(mask_path, 0)
-                            img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather)
+                            img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather, luma_sharpen_amount=getattr(opt,"luma_sharpen_amount",0.0) if getattr(opt,"luma_sharpen",False) else 0.0, bilateral_sharpen_amount=getattr(opt,"bilateral_sharpen_amount",0.0) if getattr(opt,"bilateral_sharpen",False) else 0.0, freq_inject_amount=getattr(opt,"freq_inject_amount",0.0) if getattr(opt,"freq_inject",False) else 0.0)
                         else:
                             img_result = img_origin
                         
@@ -326,11 +336,11 @@ def cleanmosaic_video_byframe(opt, netG, netM):
                         shutil.copy2(src_path, dst_path)
                         img_result = None
                 
-                # Always remove source
-                if os.path.exists(src_path):
+                # Always remove source unless keep_frames is set
+                if os.path.exists(src_path) and not getattr(opt, 'keep_frames', False):
                     os.remove(src_path)
                     
-                results.append((i, imagepath, img_result, size > 100))
+                results.append((i, imagepath, img_result, size > getattr(opt, 'min_mosaic_size', 100)))
                 
             except Exception as e:
                 print(f'Error processing frame {imagepath}: {e}')
@@ -352,7 +362,7 @@ def cleanmosaic_video_byframe(opt, netG, netM):
             imagepath = imagepaths[idx]
             x, y, size = positions[idx]
             frame_batch.append((idx, imagepath, x, y, size))
-            if size > 100:
+            if size > getattr(opt, 'min_mosaic_size', 100):
                 mosaic_count += 1
         
         # If batch is all copies, process them one by one for steady progress
@@ -476,7 +486,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
                         print(f"\nWarning: Invalid mask for {imagepath}, using original image")
                         img_result = img_origin
                     else:
-                        img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather)
+                        img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather, luma_sharpen_amount=getattr(opt,"luma_sharpen_amount",0.0) if getattr(opt,"luma_sharpen",False) else 0.0, bilateral_sharpen_amount=getattr(opt,"bilateral_sharpen_amount",0.0) if getattr(opt,"bilateral_sharpen",False) else 0.0, freq_inject_amount=getattr(opt,"freq_inject_amount",0.0) if getattr(opt,"freq_inject",False) else 0.0)
             
             if not opt.no_preview and show_pool.qsize() < 4:
                 show_pool.put(img_result.copy())
@@ -486,7 +496,8 @@ def cleanmosaic_video_fusion(opt, netG, netM):
             
             # Clean up original image file
             try:
-                os.remove(os.path.join(video2image_dir, imagepath))
+                if not getattr(opt, 'keep_frames', False):
+                    os.remove(os.path.join(video2image_dir, imagepath))
             except OSError:
                 pass  # File might already be removed
     

@@ -156,7 +156,7 @@ def get_mosaic_position(img_origin, net_mosaic_pos, opt):
     # Remove small components
     try:
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
-        min_area = 300
+        min_area = getattr(opt, 'min_mosaic_area', 300)
         
         for i in range(1, num_labels):
             if stats[i, cv2.CC_STAT_AREA] < min_area:
