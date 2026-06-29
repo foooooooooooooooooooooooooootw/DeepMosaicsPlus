@@ -57,9 +57,9 @@ This is an optimized fork of the original DeepMosaics project with significant p
 
 ### Option 1: GUI (Easiest)
 
-Double-click `deepmosaicplusui.py` or run:
+After installing dependencies/using the install script, double-click `deepmosaicui_modern_NEW.pyw` or run:
 ```bash
-python deepmosaicplusui.py
+python deepmosaicui_modern_NEW.pyw
 ```
 
 ### Option 2: Command Line
