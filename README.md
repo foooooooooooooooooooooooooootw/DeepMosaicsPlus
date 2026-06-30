@@ -22,6 +22,7 @@ This is an optimized fork of the original DeepMosaics project with significant p
 - 🚀 **6x faster processing** - Optimized GPU utilization (1h → 10 mins on AMD 7800XT)
 - 🎮 **AMD GPU support** - DirectML integration for AMD graphics cards
 - ⚡ **Hardware acceleration** - DirectX 11 for AMD, CUDA for NVIDIA
+- 🎬 **Modern UI** - Modern video-editor style UI that shows what is being detected and cleaned in real time
 - 🔧 **Auto-detection** - Automatically detects and uses available GPU
 - 🐛 **Bug fixes planned** - Auto dependency instllation, async I/O, batch processing
 
