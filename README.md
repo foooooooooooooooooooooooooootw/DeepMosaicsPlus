@@ -90,7 +90,8 @@ python deepmosaic.py --media_path "weenus.mkv" --model_path "clean_youknow_video
 - **NVIDIA GPUs**: CUDA toolkit
 
 #### GUI (Optional)
-- customtkinter
+- customtkinter (old UI)
+- PyQt6 (new UI)
 
 ---
 
