@@ -241,6 +241,7 @@ Want to train on custom datasets? Check out the [training guide](./docs/training
 ## 📝 Roadmap
 
 - [ ] Add new output formats for encoding (HEVC, AV1, etc)
+- [ ] Make multiple models specifically meant for anime/real life + different pixel sizes
 
 ---
 
