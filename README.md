@@ -217,13 +217,15 @@ For complete documentation, see [[options_introduction.md]](./docs/options_intro
 
 **DirectML (AMD GPUs)**
 - Automatically detects DirectML-capable devices
-- Hardcoded to use GPU with CPU fallback
-- Uses DirectX 11 for hardware video acceleration
-- No need for `--gpu_id` argument
+- GPU ID of -1 refers to the CPU
+- Uses DirectX 11 for hardware accelerated frame extraction
+- Uses DirectML for inference and experimental model training
 
 **CUDA (NVIDIA GPUs)**
 - Uses CUDA for hardware acceleration
 - Specify GPU with `--gpu_id` (e.g., `--gpu_id 0` by default)
+- GPU ID of -1 refers to the CPU
+- The original default; best used for training models
 
 ### Performance Optimization
 
