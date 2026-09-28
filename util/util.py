@@ -27,7 +27,9 @@ def is_img(path):
 def is_video(path):
     ext = os.path.splitext(path)[1]
     ext = ext.lower()
-    if ext in ['.mp4','.flv','.avi','.mov','.mkv','.wmv','.rmvb','.mts']:
+    # .gif is processed through the video pipeline (animated frames);
+    # deepmosaic.py converts the result back to a GIF afterwards.
+    if ext in ['.mp4','.flv','.avi','.mov','.mkv','.wmv','.rmvb','.mts','.gif']:
         return True
     else:
         return False
@@ -81,6 +83,15 @@ def makedirs(path):
 
 def clean_tempfiles(opt,tmp_init=True):
     tmpdir = opt.temp_dir
+    if not tmp_init and getattr(opt, 'keep_temp', False):
+        # End of a finished run with --keep_temp: keep the frames for the UI's
+        # preview, but remove the resume marker so the finished run isn't
+        # offered as "unfinished" next time. The next run's file_init()
+        # (tmp_init=True) still clears everything as usual.
+        marker = os.path.join(tmpdir, 'step.json')
+        if os.path.isfile(marker):
+            os.remove(marker)
+        return
     if os.path.isdir(tmpdir): 
         print('Clean temp...')  
         shutil.rmtree(tmpdir)

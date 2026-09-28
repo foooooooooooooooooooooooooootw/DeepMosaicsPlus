@@ -81,6 +81,8 @@ class BVDNet(nn.Module):
         self.limiter = nn.Tanh()
 
     def forward(self, stream, previous):
+        if getattr(self, '_frames_mode', False):
+            return self._forward_frames(stream, previous)
         this_shortcut = stream[:,:,self.N]
         stream = self.encoder3d(stream)
         stream = stream.reshape(stream.size(0),stream.size(1),stream.size(3),stream.size(4))
@@ -92,16 +94,16 @@ class BVDNet(nn.Module):
         x = self.limiter(x)
         return x
 
-def define_G(N=2, n_blocks=1, gpu_id='-1'):
+def define_G(N=2, n_blocks=1, gpu_id='-1', device=None):
     netG = BVDNet(N = N, n_blocks=n_blocks)
-    netG = model_util.todevice(netG,gpu_id)
+    netG = model_util.todevice(netG,gpu_id,device=device)
     netG.apply(model_util.init_weights)
     return netG
 
 ################################Discriminator################################
-def define_D(input_nc=6, ndf=64, n_layers_D=1, use_sigmoid=False, num_D=3, gpu_id='-1'):          
+def define_D(input_nc=6, ndf=64, n_layers_D=1, use_sigmoid=False, num_D=3, gpu_id='-1', device=None):          
     netD = MultiscaleDiscriminator(input_nc, ndf, n_layers_D, use_sigmoid, num_D)
-    netD = model_util.todevice(netD,gpu_id)
+    netD = model_util.todevice(netD,gpu_id,device=device)
     netD.apply(model_util.init_weights)
     return netD
 
@@ -196,3 +198,142 @@ class GANLoss(nn.Module):
                 return self.lossf(dis_fake[-1],dis_real[-1])
             elif self.mode =='G':
                 return self.lossf(dis_fake[-1])
+
+
+################################ DirectML support ################################
+# torch-directml's convolution only accepts 4-D input, so Encoder3d's Conv3d
+# layers fail ("input must be 4-dimensional"). A 3-D convolution is exactly a
+# sum of 2-D convolutions -- one per temporal slice of its kernel, applied to
+# the matching input frame -- so the encoder can be recomputed on a LIST of
+# ordinary 4-D frames with identical results, and DirectML never sees a 5-D
+# tensor. Used only for inference (weights are frozen at conversion time).
+
+def _effective_weight(conv):
+    """The weight a forward pass in eval mode actually uses: spectral norm
+    (weight_orig / sigma, computed from the stored u/v vectors without a
+    power-iteration update) if present, else the plain weight."""
+    for hook in conv._forward_pre_hooks.values():
+        if type(hook).__name__ == 'SpectralNorm':
+            with torch.no_grad():
+                return hook.compute_weight(conv, do_power_iteration=False).detach().clone()
+    return conv.weight.detach().clone()
+
+class _Conv3dAs2d(nn.Module):
+    """Exact Conv3d on a list of T frames (each B,C,H,W) using only conv2d."""
+    def __init__(self, conv):
+        super().__init__()
+        assert conv.groups == 1 and tuple(conv.dilation) == (1, 1, 1) and conv.padding_mode == 'zeros'
+        w = _effective_weight(conv)                       # (out, in, kT, kH, kW)
+        self.kt, self.st, self.pt = w.shape[2], conv.stride[0], conv.padding[0]
+        self.stride2d, self.padding2d = tuple(conv.stride[1:]), tuple(conv.padding[1:])
+        self.w = nn.ParameterList([nn.Parameter(w[:, :, k].contiguous(), requires_grad=False)
+                                   for k in range(self.kt)])
+        self.b = (nn.Parameter(conv.bias.detach().clone().view(1, -1, 1, 1), requires_grad=False)
+                  if conv.bias is not None else None)
+
+    def forward(self, frames):
+        T = len(frames)
+        out = []
+        for t in range((T + 2 * self.pt - self.kt) // self.st + 1):
+            acc = None
+            for k in range(self.kt):
+                ti = t * self.st - self.pt + k                 # zero temporal padding = skip
+                if 0 <= ti < T:
+                    y = nn.functional.conv2d(frames[ti], self.w[k], None, self.stride2d, self.padding2d)
+                    acc = y if acc is None else acc + y
+            out.append(acc + self.b if self.b is not None else acc)
+        return out
+
+class _Encoder3dAs2d(nn.Module):
+    def __init__(self, enc3d):
+        super().__init__()
+        self.layers = nn.ModuleList(_Conv3dAs2d(m) if isinstance(m, nn.Conv3d) else m
+                                    for m in enc3d.model)
+
+    def forward(self, frames):
+        for m in self.layers:
+            frames = m(frames) if isinstance(m, _Conv3dAs2d) else [m(f) for f in frames]
+        return frames
+
+def _forward_frames(self, stream, previous):
+    """BVDNet.forward for converted models. The 5-D stream is split into
+    frames on the CPU and only 4-D frames are moved to the model's device."""
+    dev = next(self.parameters()).device
+    # .contiguous(): each frame sliced out of the stack is a strided view, and
+    # copying strided tensors to DirectML has been unreliable
+    frames = [f.contiguous().to(dev) for f in stream.cpu().unbind(2)]
+    this_shortcut = frames[self.N]
+    feats = self.encoder3d(frames)
+    assert len(feats) == 1, f"expected the encoder to reduce time to 1, got {len(feats)}"
+    x = feats[0] + self.encoder2d(previous.contiguous().to(dev))
+    x = self.blocks(x)
+    x = self.decoder(x)
+    return self.limiter(x + this_shortcut)
+BVDNet._forward_frames = _forward_frames
+
+def _bilinear_up_matrix(n):
+    """(2n x n) interpolation matrix reproducing PyTorch's bilinear x2 upsample
+    with align_corners=False, including its edge clamping."""
+    U = torch.zeros(2 * n, n)
+    for d in range(2 * n):
+        src = max((d + 0.5) / 2 - 0.5, 0.0)
+        i0 = min(int(src), n - 1)          # src >= 0, so int() == floor()
+        i1 = min(i0 + 1, n - 1)
+        w = src - i0
+        U[d, i0] += 1 - w
+        U[d, i1] += w
+    return U
+
+class _BilinearUp2x(nn.Module):
+    """nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+    computed as two matrix multiplications (rows, then columns). Bilinear
+    upsampling is linear and separable, so this is exact (verified against
+    F.interpolate to ~5e-7). torch-directml's own bilinear upsample returned
+    wrong values (tools/check_directml.py: relative error ~1.2 at the first
+    decoder Upsample), which showed up as heavy noise in cleaned output."""
+    def __init__(self):
+        super().__init__()
+        self._cache = {}
+
+    def _mat(self, n, x):
+        key = (n, str(x.device), x.dtype)
+        if key not in self._cache:
+            self._cache[key] = _bilinear_up_matrix(n).to(dtype=x.dtype).to(x.device)
+        return self._cache[key]
+
+    def forward(self, x):
+        uh = self._mat(x.shape[-2], x)
+        uw = self._mat(x.shape[-1], x)
+        return torch.matmul(torch.matmul(uh, x), uw.t())
+
+def _is_bilinear_up2x(m):
+    if not isinstance(m, nn.Upsample) or m.mode != 'bilinear' or m.align_corners:
+        return False
+    sf = m.scale_factor
+    return (sf if isinstance(sf, tuple) else (sf, sf)) in ((2, 2), (2.0, 2.0))
+
+def make_directml_compatible(net):
+    """Convert a BVDNet in place for DirectML. Every replacement is exact:
+      * Encoder3d's Conv3d -> sums of 2-D convolutions (DirectML convolution
+        only accepts 4-D input)
+      * bilinear Upsample -> matrix multiplications (DirectML computed it
+        incorrectly)
+      * spectral norm baked into plain weights. In eval mode it recomputes
+        the same fixed weights on every forward pass, and part of that
+        (aten::addmv) isn't supported on DirectML, so it bounced through the
+        CPU for every layer of every frame."""
+    if getattr(net, '_frames_mode', False):
+        return net
+    net.eval()
+    net.encoder3d = _Encoder3dAs2d(net.encoder3d)      # reads spectral-norm weights itself
+    for m in net.modules():
+        for hook in list(m._forward_pre_hooks.values()):
+            if type(hook).__name__ == 'SpectralNorm':
+                torch.nn.utils.remove_spectral_norm(m, name=hook.name)   # uses do_power_iteration=False
+                break
+    for parent in list(net.modules()):
+        for name, child in list(parent.named_children()):
+            if _is_bilinear_up2x(child):
+                setattr(parent, name, _BilinearUp2x())
+    net._frames_mode = True
+    return net

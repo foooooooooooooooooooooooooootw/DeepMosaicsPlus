@@ -1,4 +1,6 @@
 import torch
+import os
+import json
 from . import model_util
 from .pix2pix_model import define_G as pix2pix_G
 from .pix2pixHD_model import define_G as pix2pixHD_G
@@ -21,6 +23,7 @@ def pix2pix(opt):
     show_paramsnumber(netG,'netG')
     netG.load_state_dict(torch.load(opt.model_path))
     netG = model_util.todevice(netG,opt.gpu_id)
+    netG = model_util.to_inference_device(netG, opt)
     netG.eval()
     return netG
 
@@ -47,6 +50,7 @@ def style(opt):
     netG.load_state_dict(state_dict)
 
     netG = model_util.todevice(netG,opt.gpu_id)
+    netG = model_util.to_inference_device(netG, opt)
     netG.eval()
     return netG
 
@@ -55,6 +59,7 @@ def video(opt):
     show_paramsnumber(netG,'netG')
     netG.load_state_dict(torch.load(opt.model_path))
     netG = model_util.todevice(netG,opt.gpu_id)
+    netG = model_util.to_inference_device(netG, opt)
     netG.eval()
     return netG
 
@@ -69,5 +74,36 @@ def bisenet(opt,type='roi'):
     elif type == 'mosaic':
         net.load_state_dict(torch.load(opt.mosaic_position_model_path))
     net = model_util.todevice(net,opt.gpu_id)
+    net = model_util.to_inference_device(net, opt)
     net.eval()
     return net
+
+
+# ── Size-based model auto-selection (--auto_model) ──────────────────────────
+# Maps a detected mosaic block size (see util.mosaic.estimate_mosaic_block_pct,
+# expressed as % of the frame's shorter side) to a specific pretrained clean
+# model checkpoint. Manifest format is a flat JSON object of
+# {"<bucket_pct>": "<path to .pth, relative to the manifest file's folder>"}.
+# Selection is nearest-bucket, clamped to the manifest's own min/max buckets.
+
+def load_size_manifest(manifest_path):
+    with open(manifest_path, 'r') as f:
+        raw = json.load(f)
+    if not raw:
+        raise ValueError(f"Model manifest '{manifest_path}' is empty")
+    # keys are stored as strings in JSON; normalise to float for comparison
+    return {float(k): v for k, v in raw.items()}
+
+def select_model_by_pct(pct, manifest_path):
+    """Return (absolute_model_path, matched_bucket_pct) for the manifest
+    bucket nearest to `pct`, clamped to the manifest's own range so a
+    detected size outside [min_bucket, max_bucket] still resolves to the
+    closest trained model rather than erroring out.
+    """
+    manifest = load_size_manifest(manifest_path)
+    buckets = sorted(manifest.keys())
+    nearest = min(buckets, key=lambda b: abs(b - pct))
+    rel_path = manifest[nearest]
+    base_dir = os.path.dirname(os.path.abspath(manifest_path))
+    abs_path = rel_path if os.path.isabs(rel_path) else os.path.normpath(os.path.join(base_dir, rel_path))
+    return abs_path, nearest

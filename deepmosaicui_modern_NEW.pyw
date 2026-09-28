@@ -1,11 +1,11 @@
 """
-DeepMosaicsPlus — Modern 3-panel workstation UI
+DeepMosaicsPlus 1.2.0 — Modern 3-panel workstation UI
 Layout: Left sidebar (config) · Centre (frame viewport) · Bottom (run bar + log)
 
 Run with:  python deepmosaicui_qt2.py
 """
 
-import os, sys, glob, re
+import os, sys, glob, re, time, shutil
 from pathlib import Path
 
 from PyQt6.QtCore import (
@@ -15,7 +15,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QFont, QFontDatabase, QPainter, QPen, QBrush,
     QPixmap, QImage, QIcon, QPalette, QDragEnterEvent, QDropEvent,
-    QLinearGradient,
+    QLinearGradient, QTextCursor,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
@@ -103,6 +103,11 @@ QLineEdit, QComboBox {{
     selection-background-color: {C['accent']};
 }}
 QLineEdit:focus {{ border-color: {C['accent']}; }}
+QLineEdit:disabled, QComboBox:disabled {{
+    color: {C['border2']}; background: {C['surface']}; border-color: {C['border']};
+}}
+QSlider::handle:horizontal:disabled {{ background: {C['border2']}; }}
+QSlider::sub-page:horizontal:disabled {{ background: {C['border']}; }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
 QComboBox::down-arrow {{
     border-left: 4px solid transparent;
@@ -278,6 +283,7 @@ class FrameViewport(QWidget):
         self._mode       = "overlay"
         self._opacity    = 0.55
         self._empty      = True
+        self._banner     = None   # (title, subtitle) drawn over the frame, e.g. "Finished"
 
     # ── Public API ──────────────────────────────────────────────────────────
     def set_frame(self, path: str):
@@ -325,6 +331,17 @@ class FrameViewport(QWidget):
                 self._tint_pix = None
         except Exception:
             self._tint_pix = None
+
+    def set_banner(self, title: str, subtitle: str = ""):
+        """Tint the frame and draw a centred title/subtitle over it."""
+        if self._banner != (title, subtitle):
+            self._banner = (title, subtitle)
+            self.update()
+
+    def clear_banner(self):
+        if self._banner is not None:
+            self._banner = None
+            self.update()
 
     def clear(self):
         self._frame_pix = None
@@ -393,6 +410,21 @@ class FrameViewport(QWidget):
             p.drawPixmap(dst, self._frame_pix)
             if self._mask_pix and self._tint_pix is not None:
                 p.drawPixmap(dst, self._tint_pix)
+
+        if self._banner:
+            title, subtitle = self._banner
+            p.fillRect(dst, QColor(0, 0, 0, 140))                      # slight tint
+            size = max(14, min(dst.width() // 9, dst.height() // 5, 44))
+            f = QFont(p.font()); f.setPixelSize(size); f.setBold(True)
+            p.setFont(f); p.setPen(QColor("#ffffff"))
+            sub_size = max(11, size * 2 // 5)
+            title_h, sub_h = int(size * 1.25), (int(sub_size * 1.6) if subtitle else 0)
+            top = dst.center().y() - (title_h + sub_h) // 2        # centre both lines as a group
+            p.drawText(QRect(dst.x(), top, dst.width(), title_h), Qt.AlignmentFlag.AlignCenter, title)
+            if subtitle:
+                f2 = QFont(p.font()); f2.setPixelSize(sub_size); f2.setBold(False)
+                p.setFont(f2); p.setPen(QColor(255, 255, 255, 210))
+                p.drawText(QRect(dst.x(), top + title_h, dst.width(), sub_h), Qt.AlignmentFlag.AlignCenter, subtitle)
 
         p.end()
 
@@ -696,7 +728,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DeepMosaicsPlus")
+        self.setWindowTitle("DeepMosaicsPlus 1.2.0")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(1100, 700)
         self.resize(1280, 820)
@@ -757,6 +789,21 @@ class MainWindow(QMainWindow):
             f" letter-spacing: -0.02em; background: transparent;"
         )
         tb.addWidget(app_lbl)
+
+        ver_lbl = QLabel("v1.2.0")
+        ver_lbl.setStyleSheet(
+            f"font-size: 11px; color: {C['text_dim']}; background: transparent;"
+            f" margin-left: 6px;"
+        )
+        tb.addWidget(ver_lbl)
+
+        # Inference device badge: filled in from the "[device] Inference: X | detail"
+        # line deepmosaic.py prints once at startup, so it shows what the run
+        # actually uses (not a guess made by the GUI's own environment).
+        self._device_badge = QLabel("")
+        self._device_badge.hide()
+        tb.addWidget(self._device_badge)
+
         tb.addStretch()
 
         for symbol, tip, slot in [
@@ -946,6 +993,11 @@ class MainWindow(QMainWindow):
         self._overlay_bar.opacity_changed.connect(self._viewport.set_opacity)
         self._overlay_bar.source_changed.connect(self._on_source_changed)
         self._viewport_source = "detection"
+        self._image_source_path = None   # set when the media path is an existing image
+        self._image_result_path = None   # set after a successful image run
+        self._run_started = 0.0
+        self.media_in.textChanged.connect(self._try_show_source_thumb)
+        self.media_in.textChanged.connect(self._update_media_type_options)
         self._viewport.file_dropped.connect(self._on_file_dropped)
         self._viewport.clicked.connect(self._on_viewport_clicked)
 
@@ -1007,6 +1059,28 @@ class MainWindow(QMainWindow):
         sb.addLayout(_row(_rl("Size / Mask ⊕"), self.outsize_in, 4, self.mask_thr, None))
         sb.addWidget(_hint("⊕ Mask threshold — lower = more sensitive detection"))
 
+        self.vcodec_sel = QComboBox()
+        # name -> (default_crf, crf_min, crf_max) — mirrors util/ffmpeg.py VIDEO_CODECS
+        self.VCODEC_CRF = {
+            "h264": (18, 0, 51), "hevc": (22, 0, 51), "av1": (30, 0, 63),
+            "vp9": (31, 0, 63), "h264_nvenc": (19, 0, 51), "hevc_nvenc": (19, 0, 51),
+        }
+        self.vcodec_sel.addItems(list(self.VCODEC_CRF.keys()))
+        self.gif_out_cb = QCheckBox("Save GIF inputs as GIF")
+        self.gif_out_cb.setChecked(True)
+        self.gif_out_cb.setToolTip("Ticked: a GIF input is saved as a GIF (lossless processing, then a\n"
+                                   "256-colour palette). Unticked: saved as an MP4 using the codec and CRF below.")
+        self.gif_out_cb.setEnabled(False)          # enabled only while a GIF is selected
+        self.gif_out_cb.toggled.connect(lambda _: self._update_media_type_options(self.media_in.text()))
+        sb.addWidget(self.gif_out_cb)
+        sb.addLayout(_row(_rl("Video Codec"), self.vcodec_sel, None))
+
+        # CRF: slider (shows where you sit in the codec's own range) + a
+        # linked, editable spinbox (for typing an exact value).
+        self.encode_crf_sl = QSlider(Qt.Orientation.Horizontal)
+        self.encode_crf_sl.setRange(0, 51)
+        self.encode_crf_sl.setValue(18)
+
         self.encode_crf = QSpinBox()
         self.encode_crf.setRange(0, 51)
         self.encode_crf.setValue(18)
@@ -1017,7 +1091,40 @@ class MainWindow(QMainWindow):
                 border-radius: 5px; padding: 5px 6px; color: {C['text']}; font-size: 12px;
             }}
             QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; }}
+            QSpinBox:disabled {{
+                color: {C['border2']}; background: {C['surface']}; border-color: {C['border']};
+            }}
         """)
+
+        # Keep slider and spinbox in sync without feedback loops.
+        self.encode_crf_sl.valueChanged.connect(
+            lambda v: self.encode_crf.setValue(v) if self.encode_crf.value() != v else None)
+        self.encode_crf.valueChanged.connect(
+            lambda v: self.encode_crf_sl.setValue(v) if self.encode_crf_sl.value() != v else None)
+
+        self._crf_user_set = False
+        self.encode_crf.valueChanged.connect(lambda _: setattr(self, "_crf_user_set", True))
+
+        def _on_vcodec_changed(name):
+            default_crf, lo, hi = self.VCODEC_CRF[name]
+            for w in (self.encode_crf, self.encode_crf_sl):
+                w.blockSignals(True)
+                w.setRange(lo, hi)
+            if not self._crf_user_set:
+                self.encode_crf.setValue(default_crf)
+                self.encode_crf_sl.setValue(default_crf)
+            for w in (self.encode_crf, self.encode_crf_sl):
+                w.blockSignals(False)
+        self.vcodec_sel.currentTextChanged.connect(_on_vcodec_changed)
+
+        crf_row = QHBoxLayout()
+        crf_row.setContentsMargins(0, 0, 0, 0)
+        crf_row.setSpacing(8)
+        crf_row.addWidget(self.encode_crf_sl)
+        crf_row.addWidget(self.encode_crf)
+        crf_row_w = QWidget()
+        crf_row_w.setLayout(crf_row)
+        sb.addLayout(_row(_rl("Encode CRF"), crf_row_w, None))
 
         self.decode_qv = QSpinBox()
         self.decode_qv.setRange(1, 31)
@@ -1025,8 +1132,13 @@ class MainWindow(QMainWindow):
         self.decode_qv.setFixedWidth(58)
         self.decode_qv.setStyleSheet(self.encode_crf.styleSheet())
 
-        sb.addLayout(_row(_rl("Encode CRF"), self.encode_crf, 12, _rl("Decode QV"), self.decode_qv, None))
-        sb.addWidget(_hint("Encode CRF: 0=lossless · 18=default · 28=smaller  |  Decode QV: 1=best · 31=smallest"))
+        sb.addLayout(_row(_rl("Decode QV"), self.decode_qv, None))
+        sb.addWidget(_hint("Encode CRF range/default depend on codec (h264: 0–51, av1/vp9: 0–63)  |  Decode QV: 1=best · 31=smallest"))
+        self._media_type_hint = _hint("")
+        self._media_type_hint.setStyleSheet(self._media_type_hint.styleSheet() + f"color: {C['amber']};")
+        self._media_type_hint.setWordWrap(True)
+        self._media_type_hint.hide()
+        sb.addWidget(self._media_type_hint)
 
         # ── Detection ─────────────────────────────────────────────────────────
         sb.addWidget(_section("Detection"))
@@ -1090,8 +1202,28 @@ class MainWindow(QMainWindow):
         sb.addStretch()
 
     # ── Command generation ─────────────────────────────────────────────────────
+    @staticmethod
+    def _python_exe():
+        """Interpreter used to launch deepmosaic.py. Previously this was the
+        literal string "python", resolved through PATH at launch time -- which
+        is NOT necessarily the Python running this GUI. A common result: the
+        user's terminal (venv/conda/PATH order) resolves "python" to an install
+        with CUDA-enabled torch, so the CLI uses the GPU, while launching the
+        GUI by double-click resolves "python" to a different install with the
+        default CPU-only torch wheel -- silently running on CPU. Using the
+        GUI's own interpreter guarantees the same environment every time.
+        pythonw.exe (the usual .pyw launcher) is swapped for its sibling
+        python.exe so the child has real stdout for the log panel.
+        """
+        exe = sys.executable
+        if exe.lower().endswith('pythonw.exe'):
+            candidate = exe[:-len('pythonw.exe')] + 'python.exe'
+            if os.path.exists(candidate):
+                return candidate
+        return exe
+
     def _generate_command(self):
-        cmd = ["python", "deepmosaic.py"]
+        cmd = [self._python_exe(), "deepmosaic.py"]
 
         if self.debug_cb.isChecked():       cmd.append("--debug")
         gpu = self.gpu_in.text().strip()
@@ -1099,9 +1231,9 @@ class MainWindow(QMainWindow):
         m = self.media_in.text().strip()
         if m:                               cmd.extend(["--media_path", m])
         s = self.start_in.text().strip()
-        if s and s != "00:00:00":           cmd.extend(["-ss", s])
+        if s and s != "00:00:00" and self.start_in.isEnabled(): cmd.extend(["-ss", s])
         d = self.dur_in.text().strip()
-        if d and d != "00:00:00":           cmd.extend(["-t", d])
+        if d and d != "00:00:00" and self.dur_in.isEnabled():   cmd.extend(["-t", d])
         mdl = self.model_in.text().strip()
         if mdl:                             cmd.extend(["--model_path", mdl])
         r = self.result_in.text().strip()
@@ -1109,14 +1241,21 @@ class MainWindow(QMainWindow):
         ng = self.netg_sel.currentText()
         if ng != "auto":                    cmd.extend(["--netG", ng])
         fps = self.fps_in.text().strip()
-        if fps and fps != "0":              cmd.extend(["--fps", fps])
+        if fps and fps != "0" and self.fps_in.isEnabled():     cmd.extend(["--fps", fps])
         cmd.append("--no_preview")   # always: we show frames in our own viewport
         cmd.append("--keep_frames")  # always: prevent frame deletion so seek bar stays stable
+        cmd.append("--keep_temp")    # keep frames after the run for scrubbing; cleared on close
+        if self.gif_out_cb.isEnabled() and not self.gif_out_cb.isChecked():
+            cmd.append("--gif_to_mp4")
         crf = self.encode_crf.value()
-        if crf != 18:
+        default_crf = self.VCODEC_CRF[self.vcodec_sel.currentText()][0]
+        if crf != default_crf and self.encode_crf.isEnabled():
             cmd.extend(["--encode_crf", str(crf)])
+        vc = self.vcodec_sel.currentText()
+        if vc != "h264" and self.vcodec_sel.isEnabled():
+            cmd.extend(["--encode_vcodec", vc])
         qv = self.decode_qv.value()
-        if qv != 1:
+        if qv != 1 and self.decode_qv.isEnabled():
             cmd.extend(["--decode_qv", str(qv)])
         os_ = self.outsize_in.text().strip()
         if os_ and os_ != "0":             cmd.extend(["--output_size", os_])
@@ -1176,11 +1315,88 @@ class MainWindow(QMainWindow):
         """Empty drop zone clicked — open file dialog."""
         self._pick_file(self.media_in, "Select media file")
 
+    @staticmethod
+    def _is_image(path: str) -> bool:
+        return Path(path).suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+    def _update_media_type_options(self, path: str):
+        """Grey out options that don't apply to the selected media type.
+        Images: no frames, timing or encoding at all.
+        GIFs: trimming and FPS still apply. Saved as GIF (default), codec/CRF
+        are replaced by the automatic lossless GIF path; saved as MP4, codec/CRF
+        decide the output. Decode QV never applies (GIFs always use PNG frames)."""
+        ext = Path(path.strip().strip('"')).suffix.lower()
+        is_image = self._is_image(path.strip().strip('"'))
+        is_gif = ext == ".gif"
+        gif_as_gif = is_gif and self.gif_out_cb.isChecked()
+        self.gif_out_cb.setEnabled(is_gif)
+        for w in (self.vcodec_sel, self.encode_crf_sl, self.encode_crf):
+            w.setEnabled(not (is_image or gif_as_gif))
+        self.decode_qv.setEnabled(not (is_image or is_gif))
+        for w in (self.fps_in, self.start_in, self.dur_in):
+            w.setEnabled(not is_image)
+        if is_image:
+            msg = "Image input — FPS, start/duration and encoding options don't apply and are disabled."
+        elif gif_as_gif:
+            msg = ("GIF input saved as GIF — encoding is automatic and lossless (PNG frames, lossless "
+                   "intermediate), so codec / CRF / Decode QV are disabled. FPS and start/duration still apply.")
+        elif is_gif:
+            msg = ("GIF input saved as MP4 — codec and CRF below decide the output. "
+                   "Decode QV doesn't apply (GIFs always use lossless PNG frames).")
+        else:
+            msg = ""
+        self._media_type_hint.setText(msg)
+        self._media_type_hint.setVisible(bool(msg))
+        if hasattr(self, "_cmd_lbl"):
+            self._refresh()      # the command depends on which options are enabled
+
     def _try_show_source_thumb(self, path: str):
-        """Show a quick preview of the source file if it's an image."""
-        ext = Path(path).suffix.lower()
-        if ext in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
-            self._viewport.set_frame(path)
+        """Preview an image as soon as its path is set -- via Browse, typing/
+        pasting, or drag-and-drop. (Previously this only ran on drag-and-drop.)
+        Video files are left to the normal frame-watcher/seek-bar flow."""
+        path = path.strip().strip('"')
+        self._finish_info = None
+        self._viewport.clear_banner()
+        if self._is_image(path) and os.path.isfile(path):
+            self._image_source_path = path
+            self._image_result_path = None
+            self._overlay_bar._select_src("detection")   # "before" view
+            self._show_image_preview()
+        else:
+            self._image_source_path = None
+            self._image_result_path = None
+            # Animated GIFs go through the video pipeline (frame viewer + seek
+            # bar during the run); show the first frame as a thumbnail now.
+            if Path(path).suffix.lower() == ".gif" and os.path.isfile(path):
+                self._viewport.clear()
+                self._viewport.set_frame(path)   # QPixmap loads the first frame
+
+    def _show_image_preview(self):
+        """Detection = original image (before), Cleaned = result (after)."""
+        if not self._image_source_path:
+            return
+        if self._viewport_source == "cleaned" and self._image_result_path:
+            shown = self._image_result_path
+        else:
+            shown = self._image_source_path
+        self._viewport.clear()   # drop any stale video frame/mask overlay
+        self._viewport.set_frame(shown)
+
+    def _find_image_result(self):
+        """Newest image in the result folder named after the source and written
+        during this run. Matches any suffix (_clean, _add, style variants)
+        rather than hardcoding one naming scheme."""
+        stem = Path(self._image_source_path).stem
+        rdir = self.result_in.text().strip() or "./result"
+        if not os.path.isabs(rdir):
+            rdir = str(Path(__file__).parent / rdir)
+        best, best_t = None, self._run_started - 1
+        for p in glob.glob(os.path.join(rdir, glob.escape(stem) + "*")):
+            if self._is_image(p):
+                t = os.path.getmtime(p)
+                if t >= best_t:
+                    best, best_t = p, t
+        return best
 
     # ── Custom title bar drag ──────────────────────────────────────────────────
     def resizeEvent(self, event):
@@ -1205,8 +1421,29 @@ class MainWindow(QMainWindow):
         self.showNormal() if self.isMaximized() else self.showMaximized()
 
     # ── Frame watcher ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _temp_base():
+        """deepmosaic.py's temp folder. Always resolved from this file's folder
+        (the run's working directory), not the GUI's current directory --
+        the watcher used "./tmp/...", which pointed elsewhere whenever the GUI
+        was started from another folder (e.g. via a shortcut)."""
+        return os.path.join(str(Path(__file__).parent), "tmp", "DeepMosaics_temp")
+
+    def closeEvent(self, event):
+        """Frames are kept after a run so the preview can be scrubbed; clear
+        them when the program closes. An unfinished run (resume marker still
+        present, e.g. the window was closed mid-run) is left intact so it can
+        be resumed next time."""
+        if self._process and self._process.state() != QProcess.ProcessState.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(3000)
+        base = self._temp_base()
+        if not os.path.isfile(os.path.join(base, "step.json")):
+            shutil.rmtree(base, ignore_errors=True)
+        super().closeEvent(event)
+
     def _start_watcher(self):
-        base = "./tmp/DeepMosaics_temp"
+        base = self._temp_base()
         self._frame_dir   = os.path.join(base, "video2image")
         self._mask_dir    = os.path.join(base, "mosaic_mask")
         self._replace_dir = os.path.join(base, "replace_mosaic")
@@ -1359,7 +1596,23 @@ class MainWindow(QMainWindow):
         if self._user_scrubbing:
             self._load_frame(idx)
 
+    def _update_finish_banner(self, idx: int):
+        """"Finished" banner only while the LAST frame of a completed run is
+        shown; seeking away hides it, returning to the last frame restores it."""
+        info = getattr(self, "_finish_info", None)
+        if info and idx >= self._scrubber._maximum:
+            self._viewport.set_banner("Finished", info)
+        else:
+            self._viewport.clear_banner()
+
+    @staticmethod
+    def _fmt_elapsed(sec: float) -> str:
+        sec = int(round(sec))
+        h, rem = divmod(sec, 3600); m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
+
     def _load_frame(self, idx: int):
+        self._update_finish_banner(idx)
         if self._viewport_source == "cleaned":
             frames = self._cached_cleaned
         else:
@@ -1405,6 +1658,11 @@ class MainWindow(QMainWindow):
 
     def _on_source_changed(self, source: str):
         self._viewport_source = source
+        if getattr(self, "_image_source_path", None):
+            if source == "cleaned" and not self._image_result_path:
+                self._log_sig.emit("ℹ  No cleaned result yet — run the image first.\n")
+            self._show_image_preview()
+            return
         self._viewport._mask_pix = None
         self._viewport._tint_pix = None
         self._viewport.update()
@@ -1420,8 +1678,19 @@ class MainWindow(QMainWindow):
             self._log_sig.emit("⚠  Already running.\n"); return
 
         cmd = self._generate_command()
+        self._run_started = time.time()
+        self._image_result_path = None
+        self._finish_info = None
+        self._viewport.clear_banner()
         self._log.clear()
-        self._viewport.clear()
+        self._set_device_badge("…", "Waiting for the run to report its device")
+        # Keep the preview up for images and GIFs: images have no frames to
+        # stream (the result replaces the preview when done), and a GIF's
+        # thumbnail stays until the first extracted frame replaces it.
+        # Clearing unconditionally left the viewport blank until extraction.
+        media = self.media_in.text().strip().strip('"')
+        if not (self._image_source_path or Path(media).suffix.lower() == ".gif"):
+            self._viewport.clear()
         self._scrubber.setRange(0, 0)
         self._frame_label.setText("No frames")
         self._user_scrubbing = False
@@ -1445,7 +1714,7 @@ class MainWindow(QMainWindow):
 
         # Check for leftover temp files from a previous run
         import shutil
-        base = os.path.join(str(Path(__file__).parent), "tmp", "DeepMosaics_temp")
+        base = self._temp_base()
         has_temp = os.path.isfile(os.path.join(base, "step.json"))
         if has_temp:
             dlg = QDialog(self)
@@ -1531,12 +1800,17 @@ class MainWindow(QMainWindow):
 
         self._log_sig.emit(f"▶  {' '.join(cmd)}\n{'─'*60}\n")
         self._process.start(cmd[0], cmd[1:])
-        self._start_watcher()
+        if not self._image_source_path:   # images have no frames to watch
+            self._start_watcher()
 
     def _on_stdout(self):
         if not self._process: return
         data = self._process.readAllStandardOutput().data().decode("utf-8", errors="replace")
         self._log_sig.emit(data)
+
+        m = re.search(r"\[device\] Inference: (\w+)\s*\|?\s*([^\r\n]*)", data)
+        if m:
+            self._set_device_badge(m.group(1), m.group(2).strip())
 
         # Auto-answer the resume prompt
         if "unfinished" in data.lower() and "y/n" in data.lower():
@@ -1566,7 +1840,8 @@ class MainWindow(QMainWindow):
 
         # Use log lines to latch phase earlier than file polling can detect
         low = data.lower()
-        if self._phase == "detecting" and any(x in low for x in ["clean mosaic", "replace mosaic", "step:3"]):
+        if (not self._image_source_path and self._phase == "detecting"
+                and any(x in low for x in ["clean mosaic", "replace mosaic", "step:3"])):
             self._ever_cleaned = True
             self._phase = "cleaning"
             if self._live_btn.isChecked():
@@ -1581,13 +1856,27 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, exit_code, _):
         self._stop_watcher()
-        self._poll_frames()   # final update
+        if not self._image_source_path:
+            self._poll_frames()   # final update (video only)
         self._live_btn.setChecked(False)  # stop live tracking — seekbar is now fully interactive
         ok = exit_code == 0
         self._status_lbl.setText("Done" if ok else f"Error (code {exit_code})")
         self._status_lbl.setStyleSheet(
             f"color: {C['green'] if ok else C['red']}; font-size: 12px;")
         self._log_sig.emit(f"\n{'─'*60}\n{'✅  Done!' if ok else f'❌  Exited with code {exit_code}'}\n")
+        if ok and not self._image_source_path and self._scrubber._maximum > 0:
+            self._finish_info = f"in {self._fmt_elapsed(time.time() - self._run_started)}"
+            last = self._scrubber._maximum
+            self._scrubber.setValue(last)
+            self._load_frame(last)
+        if ok and self._image_source_path:
+            res = self._find_image_result()
+            if res:
+                self._image_result_path = res
+                self._overlay_bar._select_src("cleaned")   # "after" view
+                self._log_sig.emit(f"🖼  Result: {res}  (toggle Detection/Cleaned to compare)\n")
+            else:
+                self._log_sig.emit("ℹ  Couldn't find the output image in the result folder.\n")
 
     def _cancel(self):
         if self._process and self._process.state() != QProcess.ProcessState.NotRunning:
@@ -1602,16 +1891,37 @@ class MainWindow(QMainWindow):
         else:
             self._log_sig.emit("ℹ  No running process.\n")
 
+    def _set_device_badge(self, label: str, detail: str = ""):
+        colors = {"CUDA": (C['green'], C['green_dim'], C['green_bd']),
+                  "DirectML": (C['purple'], C['purple_dim'], C['purple_bd']),
+                  "CPU": (C['amber'], C['surface2'], C['border2'])}
+        fg, bg, bd = colors.get(label, (C['text_dim'], C['surface2'], C['border2']))
+        self._device_badge.setText(label)
+        self._device_badge.setToolTip(f"Inference device: {label}" + (f"\n{detail}" if detail else ""))
+        self._device_badge.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; color: {fg}; background: {bg};"
+            f" border: 1px solid {bd}; border-radius: 4px; padding: 1px 6px; margin-left: 8px;")
+        self._device_badge.show()
+
     def _append_log(self, text: str):
-        self._log.moveCursor(self._log.textCursor().MoveOperation.End)
-        self._log.insertPlainText(text)
-        self._log.moveCursor(self._log.textCursor().MoveOperation.End)
+        """Append without hijacking the view: only follow new output if the
+        user was already at the bottom. Scrolling up to read earlier output
+        now stays put; scrolling back to the bottom resumes auto-follow.
+        (Previously the cursor was forced to the end on every write.)"""
+        bar = self._log.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        prev = bar.value()
+        cur = QTextCursor(self._log.document())
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        cur.insertText(text)
+        bar.setValue(bar.maximum() if at_bottom else prev)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DeepMosaicsPlus")
+    app.setApplicationVersion("1.2.0")
     app.setStyleSheet(QSS)
     for family in ("Inter", "Segoe UI", "SF Pro Text", "Helvetica Neue"):
         if family in QFontDatabase.families():

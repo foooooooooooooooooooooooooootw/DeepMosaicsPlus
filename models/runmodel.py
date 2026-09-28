@@ -13,21 +13,21 @@ def run_segment(img,net,size = 360,gpu_id = '-1'):
     img = impro.resize(img,size)
     img = data.im2tensor(img, gpu_id = gpu_id, bgr2rgb = False, is0_1 = True)
     # Make sure the tensor is on the same device as the model
-    img = img.to(next(net.parameters()).device).float()
+    img = img.contiguous().to(next(net.parameters()).device).float()   # contiguous: see data.to_tensor
     mask = net(img)
     mask = data.tensor2im(mask, gray=True, is0_1 = True)
     return mask
 
 def run_pix2pix(img, net, opt):
-    if opt.netG == 'HD':
-        img = impro.resize(img, 512)
-    else:
-        img = impro.resize(img, 128)
+    target = 512 if opt.netG == 'HD' else 128
+    # INTER_AREA when shrinking avoids aliasing on large detections
+    interp = cv2.INTER_AREA if min(img.shape[:2]) > target else cv2.INTER_LINEAR
+    img = impro.resize(img, target, interpolation=interp)
 
     device = next(net.parameters()).device
     
     # DirectML-specific tensor handling
-    if 'directml' in str(device):
+    if data.is_directml(device):
         try:
             # Force CPU tensor creation first for DirectML
             img_tensor = data.im2tensor(img, device=torch.device('cpu'))
@@ -43,7 +43,7 @@ def run_pix2pix(img, net, opt):
             # Ensure model is in eval mode
             net.eval()
             
-            with torch.inference_mode():
+            with torch.no_grad():   # inference_mode is unsupported on DirectML
                 img_fake = net(img_tensor)
                 # Immediately move to CPU and clone to break DirectML tensor chain
                 img_fake = img_fake.detach().cpu().clone()
@@ -73,10 +73,61 @@ def run_pix2pix(img, net, opt):
     else:
         # Normal CUDA/CPU path
         img_tensor = data.im2tensor(img, device=device)
-        with torch.inference_mode():
+        with data.inference_context(device):
             img_fake = net(img_tensor)
         img_fake = data.tensor2im(img_fake)
         return img_fake
+
+
+def run_video_model_on_image(img, net, opt):
+    """Run a video/temporal (BVDNet) generator on a single standalone image,
+    by treating it as a one-frame "video": every temporal slot AND the
+    'previous frame' feedback input are filled with the same image.
+
+    This mirrors exactly how the real video-cleaning path already
+    bootstraps the very first frame of an actual video, before any real
+    previous prediction exists yet (see cores/clean.py's
+    cleanmosaic_video_fusion, the init_flag branch, which sets
+    previous_frame from the current frame itself) -- the difference here is
+    there's no second frame to hand a real previous prediction off to
+    afterwards, so every temporal slot just gets the same input.
+
+    Quality caveat: BVDNet's whole design is built around blending context
+    across genuinely different nearby frames to fill in mosaic-obscured
+    detail. With every input identical, that temporal blending can't
+    contribute anything a plain single-frame model wouldn't already give
+    you -- so treat this as a way to make a video checkpoint usable at all
+    on a still image, not as equivalent to what it produces on real video.
+    """
+    N, T, S = 2, 5, 3
+    INPUT_SIZE = 256
+    device = next(net.parameters()).device
+
+    # INTER_AREA when shrinking: cubic/linear skip pixels on large downscales,
+    # so fine detail aliases (lines vanish or double). Cubic only when enlarging.
+    shrinking = img.shape[0] > INPUT_SIZE or img.shape[1] > INPUT_SIZE
+    img = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE),
+                     interpolation=cv2.INTER_AREA if shrinking else cv2.INTER_CUBIC)
+    img_rgb = img[:, :, ::-1]  # BGR -> RGB, matching the video path's convention
+
+    input_stream_array = np.empty((1, T, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
+    for t in range(T):
+        input_stream_array[0, t] = img_rgb
+
+    previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, device=device)
+    input_tensor = data.to_tensor(
+        data.normalize(input_stream_array.transpose((0, 4, 1, 2, 3))),
+        gpu_id=opt.gpu_id,
+        # DirectML: keep the 5-D stream on the CPU; the converted model moves
+        # 4-D frames to the device itself (see BVDNet.make_directml_compatible)
+        device=None if data.is_directml(device) else device
+    )
+
+    with data.inference_context(device):
+        pred = net(input_tensor, previous_frame)
+
+    img_fake = data.tensor2im(pred, rgb2bgr=True)
+    return img_fake
 
 
 def traditional_cleaner(img,opt):
@@ -182,13 +233,15 @@ def get_mosaic_position(img_origin, net_mosaic_pos, opt):
         if len(x_coords) == 0 or len(y_coords) == 0:
             return None, 0, 0, 0
             
-        center_x = int(np.mean(x_coords))
-        center_y = int(np.mean(y_coords))
-        
-        # Calculate effective "size" as the maximum extent
-        x_min, x_max = np.min(x_coords), np.max(x_coords)
-        y_min, y_max = np.min(y_coords), np.max(y_coords)
-        size = max(x_max - x_min, y_max - y_min) // 2
+        # Centre the square box on the mask's BOUNDING BOX, not its centre of
+        # mass. For a lopsided mask the centre of mass sits off-centre, so a
+        # box of half-width size would stop short of the mask on one side
+        # while overshooting on the other.
+        x_min, x_max = int(np.min(x_coords)), int(np.max(x_coords))
+        y_min, y_max = int(np.min(y_coords)), int(np.max(y_coords))
+        center_x = (x_min + x_max) // 2
+        center_y = (y_min + y_max) // 2
+        size = max(x_max - x_min, y_max - y_min) // 2 + 1
         
         return mask, center_x, center_y, size
         

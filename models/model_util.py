@@ -1,5 +1,6 @@
 import functools
 from math import exp
+import os
 
 import torch
 import torch.nn as nn
@@ -10,16 +11,123 @@ import torch.nn.utils.spectral_norm as SpectralNorm
 from torchvision import models
 import torch.utils.model_zoo as model_zoo
 
+try:
+    import torch_directml
+    DIRECTML_AVAILABLE = True
+except ImportError:
+    DIRECTML_AVAILABLE = False
+
+def setup_device(opt):
+    """Pick the best available device: CUDA > DirectML > CPU. Used by
+    train/clean/train.py so training isn't CUDA-only. NOTE: DirectML
+    training support in PyTorch is meaningfully less mature than DirectML
+    inference or CUDA training of any kind — backward-pass/autograd op
+    coverage has known gaps, especially for the kind of perceptual (VGG)
+    and adversarial losses used here. This is provided as a best-effort
+    option for users without any CUDA-capable GPU, not a fully-verified
+    alternative to CUDA training — expect to possibly hit an unsupported
+    op partway through a run, and validate with a short trial run before
+    committing to a full training schedule on DirectML.
+    """
+    if getattr(opt, 'gpu_id', '0') == '-1':
+        print("Using CPU device")
+        return torch.device('cpu'), 'cpu'
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        return device, 'cuda'
+    if DIRECTML_AVAILABLE:
+        try:
+            device = torch_directml.device()
+            print(f"Using DirectML device: {device} "
+                  f"(experimental for training — see setup_device() docstring)")
+            return device, 'directml'
+        except Exception as e:
+            print(f"DirectML initialization failed: {e}, falling back to CPU")
+    print("No CUDA or DirectML device available, using CPU (training will be very slow)")
+    return torch.device('cpu'), 'cpu'
+
+def resolve_inference_device(opt):
+    """Decide the inference device ONCE (call right after option parsing) and
+    record it on opt: opt.device_type ('cuda' | 'directml' | 'cpu'),
+    opt.infer_device, opt.device_label. Prints one line the GUI reads to show
+    its device badge:  [device] Inference: <TYPE> | <details>
+
+    Previously DirectML always used its default device (index 0) and
+    --gpu_id was discarded for non-CUDA systems, and only the video path's
+    mosaic detector was ever moved to DirectML -- the cleaning model and the
+    image path stayed on CPU. Models are now placed via to_inference_device().
+    """
+    requested = str(getattr(opt, 'requested_gpu_id', opt.gpu_id))
+    opt.device_type, opt.infer_device = 'cpu', torch.device('cpu')
+    detail = 'requested with --gpu_id -1' if requested == '-1' else 'no CUDA or DirectML device available'
+    if requested != '-1':
+        if opt.gpu_id != '-1' and torch.cuda.is_available():
+            # CUDA_VISIBLE_DEVICES already narrowed to the chosen card(s)
+            opt.device_type, opt.infer_device = 'cuda', torch.device('cuda')
+            detail = f"{torch.cuda.get_device_name(0)} (gpu_id {requested})"
+        elif DIRECTML_AVAILABLE:
+            try:
+                count = torch_directml.device_count()
+                idx = int(requested) if requested.isdigit() else 0
+                if idx >= count:
+                    print(f"[device] gpu_id {requested} not found ({count} DirectML device(s)); using device 0")
+                    idx = 0
+                opt.device_type, opt.infer_device = 'directml', torch_directml.device(idx)
+                detail = f"{torch_directml.device_name(idx)} (device {idx} of {count})"
+            except Exception as e:
+                detail = f"DirectML failed to initialise ({e})"
+    if opt.device_type == 'cpu' and requested != '-1':
+        detail += _cpu_fallback_reason()
+    opt.device_label = {'cuda': 'CUDA', 'directml': 'DirectML', 'cpu': 'CPU'}[opt.device_type]
+    print(f"[device] Inference: {opt.device_label} | {detail}", flush=True)
+    return opt.infer_device
+
+def _cpu_fallback_reason():
+    """Explain an unrequested CPU fallback. The usual cause is the Python
+    environment, not the hardware: the PyTorch build installed in the Python
+    running this (e.g. system Python vs a venv) may be CPU-only. Naming the
+    interpreter and build makes that visible in the log."""
+    import sys
+    build = torch.__version__
+    if torch.version.cuda is None:
+        why = "this PyTorch is a CPU-only build"
+    else:
+        why = f"this PyTorch supports CUDA {torch.version.cuda} but sees no CUDA GPU (check the NVIDIA driver)"
+    return f" -- {why}; Python: {sys.executable} (torch {build})"
+
+def to_inference_device(net, opt):
+    """Move a freshly loaded model to the DirectML device if that's the
+    resolved inference device. CUDA/CPU placement is already handled by
+    todevice(); no-op if resolve_inference_device() was never called
+    (e.g. dataset-building scripts)."""
+    if getattr(opt, 'device_type', None) != 'directml':
+        return net
+    if hasattr(net, 'encoder3d'):
+        # video model: DirectML can't run its Conv3d layers -> exact 2-D form
+        from .BVDNet import make_directml_compatible
+        net = make_directml_compatible(net)
+    try:
+        return net.to(opt.infer_device)
+    except Exception as e:
+        print(f"[device] Could not move {type(net).__name__} to DirectML ({e}); running it on CPU")
+        return net.cpu()
+
 ################################## IO ##################################
-def save(net,path,gpu_id):
+def save(net,path,gpu_id,device=None):
     if isinstance(net, nn.DataParallel):
         torch.save(net.module.cpu().state_dict(),path)
     else:
         torch.save(net.cpu().state_dict(),path) 
-    if gpu_id != '-1':
+    if device is not None:
+        net.to(device)
+    elif gpu_id != '-1':
         net.cuda()
 
-def todevice(net,gpu_id):
+def todevice(net,gpu_id,device=None):
+    if device is not None:
+        net = net.to(device)
+        return net
     if gpu_id != '-1' and len(gpu_id) == 1:
         net.cuda()
     elif gpu_id != '-1' and len(gpu_id) > 1:
@@ -331,11 +439,13 @@ class HingeLossG(nn.Module):
         return loss_fake
 
 class VGGLoss(nn.Module):
-    def __init__(self, gpu_id):
+    def __init__(self, gpu_id, device=None):
         super(VGGLoss, self).__init__()  
 
         self.vgg = Vgg19()
-        if gpu_id != '-1' and len(gpu_id) == 1:
+        if device is not None:
+            self.vgg = self.vgg.to(device)
+        elif gpu_id != '-1' and len(gpu_id) == 1:
             self.vgg.cuda()
         elif gpu_id != '-1' and len(gpu_id) > 1:
             self.vgg = nn.DataParallel(self.vgg)

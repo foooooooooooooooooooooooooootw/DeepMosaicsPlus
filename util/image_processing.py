@@ -1,3 +1,4 @@
+import os
 import cv2
 import numpy as np
 import random
@@ -49,11 +50,14 @@ def imwrite(file_path,img,use_thread=False):
         if system_type == 'Linux':
             cv2.imwrite(file_path, img)
         else:
-            cv2.imencode('.jpg', img)[1].tofile(file_path)
+            # Encode in the format the filename asks for. This used to always
+            # encode JPEG, so a '.png' path would silently get JPEG data.
+            ext = os.path.splitext(file_path)[1] or '.jpg'
+            cv2.imencode(ext, img)[1].tofile(file_path)
     if use_thread:
         t = Thread(target=subfun,args=(file_path, img,))
-        t.daemon()
-        t.start
+        t.daemon = True      # was t.daemon() -- a TypeError
+        t.start()            # was t.start -- never actually started
     else:
         subfun(file_path,img)
 
@@ -66,6 +70,11 @@ def resize(img,size,interpolation=cv2.INTER_LINEAR):
     cv2.INTER_LANCZOS4     8x8像素邻域的Lanczos插值
     '''
     h, w = img.shape[:2]
+    if h == 0 or w == 0:
+        raise ValueError(f"resize() received an empty image (shape {img.shape}) - this usually means "
+                          f"a zero-sized crop was passed in (e.g. no ROI/face detected for that frame). "
+                          f"Check the caller's bounding-box logic; this function can't meaningfully "
+                          f"resize an image with no pixels.")
     if np.min((w,h)) ==size:
         return img
     if w >= h:
@@ -183,12 +192,37 @@ def mask_area(mask):
     mask = cv2.threshold(mask,127,255,0)[1]
     # contours= cv2.findContours(mask,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)[1] #for opencv 3.4
     contours= cv2.findContours(mask,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)[0]#updata to opencv 4.0
-    try:
-        area = cv2.contourArea(contours[0])
-    except:
-        area = 0
+    if not contours:
+        return 0
+    # Use the LARGEST contour, not just whichever one OpenCV happens to list
+    # first (contour ordering is not guaranteed to correlate with size) —
+    # matches the convention already used by find_mostlikely_ROI() above.
+    area = max(cv2.contourArea(c) for c in contours)
     return area
 
+
+def crop_mosaic_region(img, x, y, size):
+    """Crop the square region centred on (x, y) with half-width `size`,
+    clipped to the image bounds using EXACTLY the same math as
+    replace_mosaic() uses for the paste-back.
+
+    A raw img[y-size:y+size, x-size:x+size] is wrong whenever the box crosses
+    the top or left edge: numpy treats a negative start as "count from the
+    end", so it silently grabs a sliver from the opposite side of the image
+    (or nothing at all). replace_mosaic() then stretches that wrong sliver
+    across the correct, clipped paste region -- producing output that looks
+    zoomed/cropped while keeping the original dimensions. Loose detection
+    settings (low mask threshold / area / size) make edge-crossing boxes
+    much more likely, which is when this shows up.
+
+    Returns the crop, or None if the box doesn't overlap the image at all.
+    """
+    h, w = img.shape[:2]
+    x0, y0 = max(0, x - size), max(0, y - size)
+    x1, y1 = min(w, x + size), min(h, y + size)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return img[y0:y1, x0:x1]
 
 def replace_mosaic(img_origin, img_fake, mask, x, y, size, no_feather,
                    luma_sharpen_amount=0.0,
@@ -239,7 +273,17 @@ def replace_mosaic(img_origin, img_fake, mask, x, y, size, no_feather,
         img_fake_resized = luma_sharpen(img_fake_resized, amount=luma_sharpen_amount)
 
     if no_feather:
-        img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1] = img_fake_resized
+        # Hard-edged composite THROUGH THE MASK. This used to paste the whole
+        # square box, overwriting every pixel inside it -- including parts of
+        # the image that were never mosaiced, re-rendered at the network's
+        # low (128/256px) resolution. With a large or wide detection that box
+        # can cover most of the frame, which looked like the whole image had
+        # been zoomed/blurred. "No feathering" should mean no soft edge, not
+        # "replace the box".
+        mask_crop = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)[
+            clipped_y0:clipped_y1, clipped_x0:clipped_x1] > 127
+        region = img_origin[clipped_y0:clipped_y1, clipped_x0:clipped_x1]
+        region[mask_crop] = img_fake_resized[mask_crop]
         return img_origin
     else:
         # Color correction (optional)

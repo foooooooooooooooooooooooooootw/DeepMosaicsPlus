@@ -6,6 +6,7 @@ import torch
 from models import runmodel
 from util import data,util,ffmpeg,filt
 from util import image_processing as impro
+from util import mosaic as mosaic_util
 from .init import video_init
 from multiprocessing import Queue, Process
 from queue import Queue
@@ -19,36 +20,141 @@ torch.set_float32_matmul_precision('high')
 try:
     import torch_directml
     DIRECTML_AVAILABLE = True
-    print("DirectML available for acceleration")
 except ImportError:
     DIRECTML_AVAILABLE = False
-    print("DirectML not available, using CUDA/CPU")
+# (import-time "DirectML available" prints removed: the "[device] Inference:"
+#  line printed at startup reports the device actually used)
 
 def setup_device(opt):
     """Setup optimal device for processing"""
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        device_type = 'cuda'
-        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
-        return device, device_type
-        
-    elif DIRECTML_AVAILABLE:
-        try:
-            device = torch_directml.device()
-            device_type = 'directml'
-            print(f"Using DirectML device: {device}")
-            return device, device_type
-        except Exception as e:
-            print(f"DirectML initialization failed: {e}, falling back to CUDA/CPU")
-    else:
-        device = torch.device('cpu')
-        device_type = 'cpu'
-        print("Using CPU device")
-    return device, device_type
+    # Follow the device resolved once at startup (model_util.
+    # resolve_inference_device). This used to pick CUDA whenever it existed --
+    # even with --gpu_id -1 -- always used DirectML device 0, and hit an
+    # undefined 'device' if DirectML failed to initialise.
+    if getattr(opt, 'device_type', None):
+        return opt.infer_device, opt.device_type
+    if opt.gpu_id != '-1' and torch.cuda.is_available():
+        return torch.device("cuda"), 'cuda'
+    return torch.device('cpu'), 'cpu'
 
 '''
 ---------------------Clean Mosaic---------------------
 '''
+
+# ── --auto_model: pick netG by detected mosaic size ─────────────────────────
+_netG_cache = {}
+
+def _load_netG_cached(opt, model_path):
+    """Load (and cache, keyed by path) a clean-model netG for a specific
+    checkpoint, reusing the existing loadmodel.pix2pix/video loaders by
+    temporarily pointing opt.model_path at it. Cached so a video with many
+    frames in the same detected bucket doesn't reload weights repeatedly.
+    """
+    if model_path not in _netG_cache:
+        from models import loadmodel
+        prev_path = getattr(opt, 'model_path', None)
+        opt.model_path = model_path
+        try:
+            _netG_cache[model_path] = loadmodel.video(opt) if opt.netG == 'video' else loadmodel.pix2pix(opt)
+        finally:
+            opt.model_path = prev_path
+    return _netG_cache[model_path]
+
+def _manifest_pct_bounds(manifest_path):
+    """Read a size manifest's own bucket range and use it to bound the
+    detector's search. This matters a lot in practice: an unconstrained
+    search (the full 2-128px default) is wide open to small-scale
+    compression artifacts (H.264 macroblocking, deblocking filter edges,
+    chroma subsampling) that create their own spurious periodicity at a
+    tiny scale unrelated to the actual mosaic — nothing stops the detector
+    from confidently reporting ~5px when the real block is ~30px if the
+    search is allowed to look that low at all. Returns (min_pct, max_pct)
+    or (None, None) if the manifest can't be read (falls back to
+    unconstrained search rather than failing).
+    """
+    try:
+        from models import loadmodel
+        manifest = loadmodel.load_size_manifest(manifest_path)
+        return min(manifest.keys()), max(manifest.keys())
+    except Exception:
+        return None, None
+
+def select_netG_for_size(opt, netG, img, mask):
+    """Single-image/frame version: if --auto_model is set, estimate the
+    mosaic block size from (img, mask) and swap in the matching pretrained
+    model from --model_manifest. Falls back to the passed-in netG on low
+    confidence or any error, so a bad detection never breaks a run.
+    """
+    if not getattr(opt, 'auto_model', False) or opt.traditional:
+        return netG
+    try:
+        from models import loadmodel
+        min_conf = getattr(opt, 'auto_model_min_confidence', 0.15)
+        min_pct, max_pct = _manifest_pct_bounds(opt.model_manifest)
+        est = mosaic_util.estimate_mosaic_block_pct(img, mask, min_pct=min_pct, max_pct=max_pct)
+        if est is None or est['confidence'] < min_conf:
+            print(f"[auto_model] low-confidence size estimate, keeping current model")
+            return netG
+        model_path, bucket = loadmodel.select_model_by_pct(est['pct'], opt.model_manifest)
+        square_note = '' if est['is_square'] else ' (non-square block detected — verify manually)'
+        print(f"[auto_model] detected mosaic block ~{est['pct']:.2f}% of frame{square_note} "
+              f"-> using {bucket:g}% bucket model ({os.path.basename(model_path)})")
+        return _load_netG_cached(opt, model_path)
+    except Exception as e:
+        print(f"[auto_model] selection failed ({e}), keeping current model")
+        return netG
+
+def select_netG_for_size_video(opt, netG, imagepaths, positions):
+    """Video version: sample a handful of already-detected mosaic frames
+    (from the position/mask pass that already ran), estimate a single
+    representative block size for the whole clip, and swap in the matching
+    model once — rather than re-estimating/reloading per frame.
+    """
+    if not getattr(opt, 'auto_model', False) or opt.traditional:
+        return netG
+    try:
+        from models import loadmodel
+        min_size = getattr(opt, 'min_mosaic_size', 100)
+        n_samples = getattr(opt, 'auto_model_samples', 5)
+        min_conf = getattr(opt, 'auto_model_min_confidence', 0.15)
+        min_pct, max_pct = _manifest_pct_bounds(opt.model_manifest)
+
+        candidates = [i for i, (x, y, size) in enumerate(positions) if size > min_size]
+        if not candidates:
+            print("[auto_model] no confident mosaic detections in this video, keeping current model")
+            return netG
+        step = max(1, len(candidates) // n_samples)
+        sample_idxs = candidates[::step][:n_samples]
+
+        pairs = []
+        for i in sample_idxs:
+            if i >= len(imagepaths):
+                continue
+            imagepath = imagepaths[i]
+            img_path = os.path.join(opt.temp_dir, 'video2image', imagepath)
+            mask_path = os.path.join(opt.temp_dir, 'mosaic_mask', imagepath)
+            if os.path.exists(img_path) and os.path.exists(mask_path):
+                img = impro.imread(img_path)
+                mask = cv2.imread(mask_path, 0)
+                if img is not None and mask is not None:
+                    pairs.append((img, mask))
+
+        result = mosaic_util.estimate_mosaic_block_pct_multi(pairs, min_confidence=min_conf, min_pct=min_pct, max_pct=max_pct)
+        if result is None:
+            print("[auto_model] could not confidently estimate mosaic size, keeping current model")
+            return netG
+
+        model_path, bucket = loadmodel.select_model_by_pct(result['pct'], opt.model_manifest)
+        square_note = ''
+        if result['n_nonsquare'] > 0:
+            square_note = f" ({result['n_nonsquare']}/{result['n_samples']} samples non-square — verify manually)"
+        print(f"[auto_model] detected mosaic block ~{result['pct']:.2f}% of frame "
+              f"(from {result['n_samples']} sampled frames){square_note} "
+              f"-> using {bucket:g}% bucket model ({os.path.basename(model_path)})")
+        return _load_netG_cached(opt, model_path)
+    except Exception as e:
+        print(f"[auto_model] selection failed ({e}), keeping current model")
+        return netG
 def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
     """Optimized mosaic position detection with batch processing and error handling"""
     device, device_type = setup_device(opt)
@@ -80,7 +186,7 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
     positions = []
     batch_size = getattr(opt, 'position_batch_size', 4)  # Reduced batch size
     
-    print('Step:2/4 -- Find mosaic location (DirectML)')
+    print(f'Step:2/4 -- Find mosaic location ({device_type})')   # was hardcoded '(DirectML)'
     
     if not opt.no_preview:
         cv2.namedWindow('mosaic mask', cv2.WINDOW_NORMAL)
@@ -207,29 +313,38 @@ def cleanmosaic_img(opt,netG,netM):
     path = opt.media_path
     print('Clean Mosaic:',path)
     img_origin = impro.imread(path)
-    x,y,size,mask = runmodel.get_mosaic_position(img_origin,netM,opt)
-    #cv2.imwrite('./mask/'+os.path.basename(path), mask)
+    mask, x, y, size = runmodel.get_mosaic_position(img_origin,netM,opt)
     img_result = img_origin.copy()
-    if size > getattr(opt, 'min_mosaic_size', 100):
-        img_mosaic = img_origin[y-size:y+size,x-size:x+size]
+    # Clipped crop -- see impro.crop_mosaic_region for why a raw slice is wrong near edges
+    img_mosaic = impro.crop_mosaic_region(img_origin, x, y, size) if size > getattr(opt, 'min_mosaic_size', 100) else None
+    if img_mosaic is not None:
         if opt.traditional:
             img_fake = runmodel.traditional_cleaner(img_mosaic,opt)
         else:
-            img_fake = runmodel.run_pix2pix(img_mosaic,netG,opt)
+            netG = select_netG_for_size(opt, netG, img_origin, mask)
+            if opt.netG == 'video':
+                img_fake = runmodel.run_video_model_on_image(img_mosaic,netG,opt)
+            else:
+                img_fake = runmodel.run_pix2pix(img_mosaic,netG,opt)
         img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather, luma_sharpen_amount=getattr(opt,"luma_sharpen_amount",0.0) if getattr(opt,"luma_sharpen",False) else 0.0, bilateral_sharpen_amount=getattr(opt,"bilateral_sharpen_amount",0.0) if getattr(opt,"bilateral_sharpen",False) else 0.0, freq_inject_amount=getattr(opt,"freq_inject_amount",0.0) if getattr(opt,"freq_inject",False) else 0.0)
     else:
         print('Do not find mosaic')
     impro.imwrite(os.path.join(opt.result_dir,os.path.splitext(os.path.basename(path))[0]+'_clean.jpg'),img_result)
 
 def cleanmosaic_img_server(opt,img_origin,netG,netM):
-    x,y,size,mask = runmodel.get_mosaic_position(img_origin,netM,opt)
+    mask, x, y, size = runmodel.get_mosaic_position(img_origin,netM,opt)
     img_result = img_origin.copy()
-    if size > getattr(opt, 'min_mosaic_size', 100):
-        img_mosaic = img_origin[y-size:y+size,x-size:x+size]
+    # Clipped crop -- see impro.crop_mosaic_region for why a raw slice is wrong near edges
+    img_mosaic = impro.crop_mosaic_region(img_origin, x, y, size) if size > getattr(opt, 'min_mosaic_size', 100) else None
+    if img_mosaic is not None:
         if opt.traditional:
             img_fake = runmodel.traditional_cleaner(img_mosaic,opt)
         else:
-            img_fake = runmodel.run_pix2pix(img_mosaic,netG,opt)
+            netG = select_netG_for_size(opt, netG, img_origin, mask)
+            if opt.netG == 'video':
+                img_fake = runmodel.run_video_model_on_image(img_mosaic,netG,opt)
+            else:
+                img_fake = runmodel.run_pix2pix(img_mosaic,netG,opt)
         img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather, luma_sharpen_amount=getattr(opt,"luma_sharpen_amount",0.0) if getattr(opt,"luma_sharpen",False) else 0.0, bilateral_sharpen_amount=getattr(opt,"bilateral_sharpen_amount",0.0) if getattr(opt,"bilateral_sharpen",False) else 0.0, freq_inject_amount=getattr(opt,"freq_inject_amount",0.0) if getattr(opt,"freq_inject",False) else 0.0)
     return img_result
 
@@ -238,6 +353,7 @@ def cleanmosaic_video_byframe(opt, netG, netM):
     fps, imagepaths, height, width = video_init(opt, path)
     start_frame = int(imagepaths[0][7:13])
     positions = get_mosaic_positions(opt, netM, imagepaths, savemask=True)[(start_frame - 1):]
+    netG = select_netG_for_size_video(opt, netG, imagepaths, positions)
 
     t1 = time.time()
     
@@ -315,7 +431,9 @@ def cleanmosaic_video_byframe(opt, netG, netM):
                     # Slow path - neural network processing
                     img_origin = impro.imread(src_path)
                     try:
-                        img_mosaic = img_origin[y-size:y+size, x-size:x+size]
+                        img_mosaic = impro.crop_mosaic_region(img_origin, x, y, size)
+                        if img_mosaic is None:
+                            raise ValueError('detected mosaic box lies outside the frame')
                         
                         if opt.traditional:
                             img_fake = runmodel.traditional_cleaner(img_mosaic, opt)
@@ -422,7 +540,8 @@ def cleanmosaic_video_byframe(opt, netG, netM):
         fps,
         os.path.join(opt.temp_dir, 'replace_mosaic', f'output_%06d.{opt.tempimage_type}'),
         os.path.join(opt.temp_dir, 'voice_tmp.mp3'),
-        os.path.join(opt.result_dir, os.path.splitext(os.path.basename(path))[0] + '_clean.mp4')
+        os.path.join(opt.result_dir, os.path.splitext(os.path.basename(path))[0] + '_clean.mp4'),
+        crf=opt.encode_crf, vcodec=opt.encode_vcodec
     )
 
 def cleanmosaic_video_fusion(opt, netG, netM):
@@ -444,6 +563,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     fps, imagepaths, height, width = video_init(opt, path)
     start_frame = int(imagepaths[0][7:13])
     positions = get_mosaic_positions(opt, netM, imagepaths, savemask=True)[(start_frame-1):]
+    netG = select_netG_for_size_video(opt, netG, imagepaths, positions)
     t1 = time.time()
     
     if not opt.no_preview:
@@ -559,6 +679,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
                         resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
                         input_stream_array[0, idx] = resized[:, :, ::-1]  # BGR to RGB
                 
+                g_dev = next(netG.parameters()).device
                 if init_flag:
                     init_flag = False
                     # Convert middle frame for previous_frame
@@ -569,10 +690,27 @@ def cleanmosaic_video_fusion(opt, netG, netM):
                     data.normalize(input_stream_array.transpose((0, 4, 1, 2, 3))), 
                     gpu_id=opt.gpu_id
                 )
+                # Inputs must live on the model's device (DirectML models get
+                # CPU-built tensors otherwise).
+                # The 5-D stream stays on the CPU for DirectML: the converted model
+                # splits it into 4-D frames itself (DirectML can't hold/convolve 5-D).
+                if not data.is_directml(g_dev):
+                    input_tensor = input_tensor.to(g_dev)
+                previous_frame = previous_frame.contiguous().to(g_dev)
                 
                 # Model inference with minimal overhead
-                with torch.inference_mode():
-                    unmosaic_pred = netG(input_tensor, previous_frame)
+                try:
+                    with data.inference_context(g_dev):
+                        unmosaic_pred = netG(input_tensor, previous_frame)
+                except RuntimeError as e:
+                    if g_dev.type == 'cpu':
+                        raise
+                    # e.g. an operator DirectML doesn't support: finish on CPU
+                    print(f"\n[device] Model failed on {g_dev} ({e}); continuing on CPU")
+                    netG = netG.cpu()
+                    input_tensor, previous_frame = input_tensor.cpu(), previous_frame.cpu()
+                    with torch.inference_mode():
+                        unmosaic_pred = netG(input_tensor, previous_frame)
                 
                 img_fake = data.tensor2im(unmosaic_pred, rgb2bgr=True)
                 previous_frame = unmosaic_pred
@@ -607,5 +745,6 @@ def cleanmosaic_video_fusion(opt, netG, netM):
         fps,
         opt.temp_dir + '/replace_mosaic/output_%06d.' + opt.tempimage_type,
         opt.temp_dir + '/voice_tmp.mp3',
-        os.path.join(opt.result_dir, os.path.splitext(os.path.basename(path))[0] + '_clean.mp4')
+        os.path.join(opt.result_dir, os.path.splitext(os.path.basename(path))[0] + '_clean.mp4'),
+        crf=opt.encode_crf, vcodec=opt.encode_vcodec
     )

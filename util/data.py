@@ -11,7 +11,7 @@ from . import degradater
 def to_tensor(data, gpu_id, device=None):
     data = torch.from_numpy(data)
     if device is not None:
-        data = data.to(device)
+        data = data.contiguous().to(device)   # contiguous: strided copies to DirectML are unreliable
     elif gpu_id != '-1':
         if torch.cuda.is_available():
             data = data.cuda()
@@ -48,6 +48,24 @@ def tensor2im(image_tensor, gray=False, rgb2bgr = True ,is0_1 = False, batch_ind
         image_numpy = image_numpy[...,::-1]-np.zeros_like(image_numpy)
     return image_numpy.astype(np.uint8)
 
+def is_directml(device):
+    """True for a torch-directml device. Its name is 'privateuseone:N', so the
+    old checks ('directml' in str(device)) never matched and the DirectML-
+    specific code paths never ran."""
+    if device is None:
+        return False
+    return getattr(device, 'type', None) == 'privateuseone' or 'directml' in str(device).lower()
+
+def inference_context(device):
+    """Gradient-free context for running a model on `device`.
+    torch.inference_mode() is marginally faster, but it produces 'inference
+    tensors', which torch-directml doesn't fully support -- running a model
+    on DirectML inside it fails with 'Cannot set version_counter for
+    inference tensor'. torch.no_grad() gives the same memory savings with
+    ordinary tensors, so it's used for DirectML; CUDA/CPU keep inference_mode.
+    """
+    return torch.no_grad() if is_directml(device) else torch.inference_mode()
+
 def im2tensor(image_numpy, gray=False, bgr2rgb=True, reshape=True, device=None, gpu_id='-1', is0_1=False, **kwargs):
     if gray:
         h, w = image_numpy.shape
@@ -70,7 +88,7 @@ def im2tensor(image_numpy, gray=False, bgr2rgb=True, reshape=True, device=None, 
 
     # Handle device placement with DirectML safety
     if device is not None:
-        if 'directml' in str(device):
+        if is_directml(device):
             # For DirectML, ensure contiguous tensor and proper format
             image_tensor = image_tensor.contiguous()
             image_tensor = image_tensor.to(device)

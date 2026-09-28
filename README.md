@@ -82,7 +82,7 @@ python deepmosaic.py --media_path "weenus.mkv" --model_path "clean_youknow_video
 
 #### Core Libraries
 - [PyTorch 1.0+](https://pytorch.org/)
-- [FFmpeg 3.4.6](http://ffmpeg.org/)
+- [FFmpeg 4.0.0](http://ffmpeg.org/) (Minimum 4.0.0 for av1 encoding but feel free to use older versions)
 - opencv-python
 - torchvision
 
@@ -104,7 +104,9 @@ Download the latest pre-packaged release with models included:
 
 **[📦 Download DeepMosaicsPlus.zip](https://github.com/foooooooooooooooooooooooooootw/DeepMosaicsPlus/releases/latest/download/DeepMosaicsPlus.zip)**
 
-Extract the zip file and you're ready to go! Skip to the [Usage](#-usage) section.
+Extract the zip file and you're ready to go! **Run the install_script.py before first use.**
+
+Skip to the [Usage](#-usage) section.
 
 ### Option B: Clone from Source
 
@@ -116,7 +118,7 @@ cd DeepMosaicsPlus
 
 ### 2. Install Dependencies
 
-You can use the new install_script.py to install dependencies. If you want to do it manually then here - but the pip install provided below installs both new and old UI dependencies
+You can **use the new install_script.py to install dependencies**. If you want to do it manually then here - but the pip install provided below installs both new and old UI dependencies
 
 ```bash
 pip install torch torchvision opencv-python customtkinter pyqt6
@@ -240,7 +242,7 @@ Want to train on custom datasets? Check out the [training guide](./docs/training
 
 ## 📝 Roadmap
 
-- [ ] Add new output formats for encoding (HEVC, AV1, etc)
+- [x] Add new output formats for encoding (HEVC, AV1, etc)
 - [ ] Make multiple models specifically meant for anime/real life + different pixel sizes
 
 ---

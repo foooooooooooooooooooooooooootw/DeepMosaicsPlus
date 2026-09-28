@@ -1,15 +1,27 @@
-DeepMosaics: 0.5.1
-Core building with:
-    Python: 3.7.3 (default, Apr 24 2019, 15:29:51) [MSC v.1915 64 bit (AMD64)]
-    Pytorch: 1.7.1
-    OpenCV: 4.1.2
-    Platform: Windows-10-10.0.19041-SP0
-    Driver Version: 461.40
-    CUDA:11.0
-GUI building with C#
-For more detail, please view on github: https://github.com/HypoX64/DeepMosaics
+DeepMosaicsPlus: 1.2.0 (fork of DeepMosaics 0.5.1)
+For more detail, please view on github: https://github.com/foooooooooooooooooooooooooootw/DeepMosaicsPlus
 
 Releases History
+  V1.2.0 (DeepMosaicsPlus)
+    New:
+      1.Configurable video codec on output encode: h264 / hevc / av1 / vp9 / h264_nvenc / hevc_nvenc
+      2.Per-codec default CRF/CQ values (CRF scales differ between encoders)
+      3.Clear preflight error when ffmpeg/ffprobe are missing, instead of a bare OS error deep in processing
+      4.GIF input support: processed as video, output converted back to a looping GIF with a lossless path (PNG frames + lossless intermediate)
+      5.Image and GIF previews in the GUI, with Detection/Cleaned toggle to compare before and after
+      6.Inference device badge in the GUI (CUDA / DirectML / CPU), reported by the run itself
+      7.DirectML: --gpu_id selects the DirectML device; the cleaning model and image path run on the GPU (previously CPU)
+      8.Options that don't apply to images or GIFs are greyed out in the GUI
+      9.Frames are kept after a run so the preview can be scrubbed (cleared when the program closes); "Finished" overlay on the last frame
+      10.Dataset tool: --save_freq and --scene_accept_ratio settings; video models can clean single images
+      11.Installer detects the GPU and installs a working PyTorch build (verified on the GPU); requirements.txt; launchers that use the installer's Python (works with venvs)
+    Fix:
+      1.Installer installed CPU-only PyTorch for NVIDIA GPUs on Windows; GUI launched deepmosaic.py with whichever Python was first on PATH (could silently run on CPU)
+      2.Hardware video decode crashed on systems where the decoder isn't usable; now falls back to software
+      3.Videos with no audio track crashed; GIF/image runs no longer require ffmpeg
+      4.Windows: startup work was repeated in every frame-extraction worker (log spam, slow extraction)
+      5.Log no longer jumps to the bottom while scrolled up; missing preview during frame extraction
+
   V0.5.1
     Fix:
       1.Fix Some BUGs when restore unfinished tasks.

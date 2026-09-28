@@ -7,6 +7,18 @@ import subprocess
 import threading
 import queue
 import time
+import sys as _sys
+
+def _resolve_python_exe():
+    """Use the interpreter running this GUI (not whatever 'python' resolves
+    to on PATH, which may be a different install with CPU-only torch).
+    pythonw.exe is swapped for its sibling python.exe for real stdout."""
+    exe = _sys.executable
+    if exe.lower().endswith('pythonw.exe'):
+        candidate = exe[:-len('pythonw.exe')] + 'python.exe'
+        if os.path.exists(candidate):
+            return candidate
+    return exe
 
 # Set appearance mode and color theme
 ctk.set_appearance_mode("dark")  # Modes: "System" (standard), "Dark", "Light"
@@ -15,7 +27,7 @@ ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark
 class DeepMosaicsUI:
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("DeepMosaicsPlus UI")
+        self.root.title("DeepMosaicsPlus 1.2.0 UI")
         self.root.geometry("800x1000")
         self.root.resizable(True, True)
         
@@ -463,7 +475,7 @@ class DeepMosaicsUI:
             self.result_entry.insert(0, dir_path)
     
     def generate_command(self):
-        cmd = ["python", "deepmosaic.py"]
+        cmd = [_resolve_python_exe(), "deepmosaic.py"]
         
         # Base arguments
         if self.debug_var.get():
