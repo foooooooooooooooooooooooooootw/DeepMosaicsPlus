@@ -24,7 +24,6 @@ This is an optimized fork of the original DeepMosaics project with significant p
 - ⚡ **Hardware acceleration** - DirectX 11 for AMD, CUDA for NVIDIA
 - 🎬 **Modern UI** - Modern video-editor style UI that shows what is being detected and cleaned in real time
 - 🔧 **Auto-detection** - Automatically detects and uses available GPU
-- 🐛 **Bug fixes planned** - Auto dependency instllation, async I/O, batch processing
 
 > **Note**: The original project was revolutionary for the time - a proof of concept of sorts - and as such does not use CPU/GPU resources efficiently. This fork addresses that with substantial performance gains. Most programs also only use CUDA which locks all AMD GPU users out. Only the mosaic removal part was optimized, adding mosaics was not touched by me.
 
@@ -88,7 +87,7 @@ python deepmosaic.py --media_path "weenus.mkv" --model_path "clean_youknow_video
 
 #### GPU Support
 - **AMD GPUs**: torch_directml (auto-detects DirectML devices)
-- **NVIDIA GPUs**: CUDA toolkit
+- **NVIDIA GPUs**: torch+CUDA & CUDA toolkit 
 
 #### GUI (Optional)
 - customtkinter (old UI)
@@ -245,6 +244,8 @@ Want to train on custom datasets? Check out the [training guide](./docs/training
 ## 📝 Roadmap
 
 - [x] Add new output formats for encoding (HEVC, AV1, etc)
+- [ ] Add additional image demosaic final file extensions (not just jpg)
+- [ ] Explore more operations that can be moved to GPU to reduce CPU work
 - [ ] Make multiple models specifically meant for anime/real life + different pixel sizes
 
 ---
