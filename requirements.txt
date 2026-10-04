@@ -1,0 +1,41 @@
+# DeepMosaicsPlus 1.2.0 - Python dependencies
+#
+# PyTorch is NOT listed here: the right build depends on your GPU, and pip
+# cannot pick it automatically. The easiest way is to run install_script.py,
+# which detects your GPU, installs the matching PyTorch, verifies it works, and
+# then installs this file. To do it by hand, install PyTorch FIRST:
+#
+#   NVIDIA (CUDA):
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#     (replace cu126 with a CUDA version your driver supports -- run nvidia-smi and
+#      see https://pytorch.org/get-started/locally/)
+#   AMD / Intel on Windows (DirectML, Python 3.8-3.12 only):
+#     pip install torch-directml
+#     (this installs the torch/torchvision versions it requires)
+#   CPU only:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+# NOTE: on Windows a plain "pip install torch" installs the CPU-only build,
+#       even on a PC with an NVIDIA GPU.
+#
+# Then:  pip install -r requirements.txt
+#
+# FFmpeg (a separate program, not a Python package) is also required for
+# video and GIF input: https://ffmpeg.org/download.html
+
+# --- core (always required) ---
+numpy
+opencv-python<5    # 4.x is what's tested; 5.0 is a new major version
+tqdm
+
+# --- GUIs ---
+PyQt6            # modern UI (deepmosaicui_modern_NEW.pyw) and the dataset tool
+customtkinter<6  # stable UI (deepmosaicui_stable_old.pyw / deepmosaicui.pyw)
+
+# --- training (train/, tools/train_all_buckets.py, tools/dataset_prep_ui.pyw) ---
+scikit-image
+tensorboardX
+matplotlib       # only train/add/train.py
+
+# --- optional ---
+# flask          # only tools/server.py
