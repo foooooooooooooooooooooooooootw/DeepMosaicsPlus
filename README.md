@@ -74,7 +74,7 @@ python deepmosaic.py --media_path "weenus.mkv" --model_path "clean_youknow_video
 
 ### System Requirements
 - **OS**: Windows (DirectML requirement)
-- **Python**: 3.6 or higher
+- **Python**: 3.8 or higher 
 - **GPU**: Any AMD or NVIDIA GPU (CPU fallback available)
 
 ### Dependencies
@@ -244,7 +244,7 @@ Want to train on custom datasets? Check out the [training guide](./docs/training
 ## 📝 Roadmap
 
 - [x] Add new output formats for encoding (HEVC, AV1, etc)
-- [ ] Add additional image demosaic final file extensions (not just jpg)
+- [x] Add additional image demosaic final file extensions (not just jpg)
 - [ ] Explore more operations that can be moved to GPU to reduce CPU work
 - [ ] Make multiple models specifically meant for anime/real life + different pixel sizes
 

@@ -11,7 +11,7 @@ class Options():
     def initialize(self):
 
         #base
-        self.parser.add_argument('--version', action='version', version='DeepMosaicsPlus 1.2.0 (fork of DeepMosaics 0.5.1)')
+        self.parser.add_argument('--version', action='version', version='DeepMosaicsPlus 1.2.1 (fork of DeepMosaics 0.5.1)')
         self.parser.add_argument('--debug', action='store_true', help='if specified, start debug mode')
         self.parser.add_argument('--gpu_id', type=str,default='0', help='if -1, use cpu')
         self.parser.add_argument('--media_path', type=str, default='./imgs/ruoruo.jpg',help='your videos or images path')
@@ -40,6 +40,12 @@ class Options():
         self.parser.add_argument('--tr_blur', type=int, default=10, help='ksize of blur when using traditional method, it will affect final quality')
         self.parser.add_argument('--tr_down', type=int, default=10, help='downsample when using traditional method,it will affect final quality')
         self.parser.add_argument('--no_feather', action='store_true', help='if specified, no edge feather and color correction, but run faster')
+        self.parser.add_argument('--infer_size', type=int, default=0, help='input size the video clean model runs at (px). 0 = automatic: the size recorded next to the checkpoint by train.py (model_info.json), else 256. Set it when a model was trained at a non-default --finesize and its model_info.json is missing')
+        self.parser.add_argument('--img_format', type=str, default='same', choices=['same', 'jpg', 'png', 'webp', 'bmp', 'tiff'], help='file format of IMAGE results. same = same format as the input image (png -> png, jpg -> jpg ...). PNG, WebP and TIFF keep transparency; JPG and BMP cannot, so transparent areas are filled with --img_background')
+        self.parser.add_argument('--img_quality', type=int, default=95, help='JPG / lossy WebP quality, 1-100 (higher = better and larger)')
+        self.parser.add_argument('--png_compression', type=int, default=3, help='PNG compression level 0-9. Lossless at every level; higher = smaller file, slower to save')
+        self.parser.add_argument('--webp_lossless', action='store_true', help='save WebP results losslessly (--img_quality is then ignored)')
+        self.parser.add_argument('--img_background', type=str, default='#ffffff', help='color that fills transparent areas when the result format cannot store transparency (JPG/BMP): #rrggbb, #rgb or r,g,b')
         self.parser.add_argument('--gif_to_mp4', action='store_true', help='save the result of a GIF input as an MP4 (using --encode_vcodec/--encode_crf) instead of converting it back to a GIF')
         self.parser.add_argument('--keep_temp', action='store_true', help='if specified, keep the temp frames after a finished run (so a UI can keep previewing them); only the resume marker is removed. The next run clears them as usual')
         self.parser.add_argument('--keep_frames', action='store_true', help='if specified, do not delete source frames from video2image dir during cleaning (useful for UI seeking)')

@@ -27,7 +27,7 @@ ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark
 class DeepMosaicsUI:
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("DeepMosaicsPlus 1.2.0 UI")
+        self.root.title("DeepMosaicsPlus 1.2.1 UI")
         self.root.geometry("800x1000")
         self.root.resizable(True, True)
         

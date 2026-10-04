@@ -23,13 +23,29 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DRY_RUN = "--dry-run" in sys.argv
 PY = sys.version_info[:2]
 
-# Newest first. The installer tries each CUDA build the driver supports and
+# Newest first. Which builds can work depends on BOTH the driver and the GPU generation
+# (see candidate_cuda_builds): RTX 50-series (Blackwell, sm_120) needs CUDA 12.8 or newer,
+# and CUDA 13 builds dropped GPUs older than Turing (GTX 10 series, V100). Not every PyTorch
+# release is built for every CUDA version, so the newest torch on a given index is what you get.
+# The installer tries each CUDA build the driver supports and
 # keeps the first one that works on the GPU; builds that don't exist for this
 # PyTorch/Python just fail to install and are skipped, so the list can include
 # versions from several PyTorch releases.
-CUDA_BUILDS = ["cu132", "cu131", "cu130", "cu129", "cu128", "cu126", "cu124", "cu121", "cu118"]
+CUDA_BUILDS = ["cu132", "cu130", "cu128", "cu126", "cu124", "cu121", "cu118"]
 TORCH_INDEX = "https://download.pytorch.org/whl/"
 DIRECTML_PYTHON = ((3, 8), (3, 12))     # torch-directml only publishes wheels for these
+
+# Real GPU work, not just "is CUDA available": padding, convolution, bilinear upsampling and a matrix
+# multiply, the same operations the models use. A build that has no kernels for this GPU's architecture
+# (e.g. RTX 50-series with PyTorch older than 2.7) reports CUDA available and then fails here.
+CUDA_SMOKE_TEST = (
+    "import torch, torch.nn.functional as F; "
+    "assert torch.cuda.is_available(), 'CUDA not available'; "
+    "x = torch.randn(1, 3, 32, 32, device='cuda'); w = torch.randn(8, 3, 3, 3, device='cuda'); "
+    "y = F.conv2d(F.pad(x, (1, 1, 1, 1), mode='reflect'), w); "
+    "y = F.interpolate(y, scale_factor=2, mode='bilinear', align_corners=False); "
+    "t = (y.flatten(1) @ y.flatten(1).t()).sum(); torch.cuda.synchronize(); float(t); "
+    "print(torch.__version__, '|', torch.cuda.get_device_name(0))")
 
 # ------------------------------------------------------------
 
@@ -78,6 +94,42 @@ def driver_cuda_version():
     m = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", out)
     return (int(m.group(1)), int(m.group(2))) if m else None
 
+def gpu_compute_capability():
+    """Compute capability of the first NVIDIA GPU, e.g. (12, 0) for an RTX 5090, or None
+    (nvidia-smi missing, or an old driver without the compute_cap query)."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        out = subprocess.check_output([exe, "--query-gpu=compute_cap", "--format=csv,noheader"],
+                                      text=True, timeout=20, stderr=subprocess.DEVNULL)
+        m = re.match(r"\s*(\d+)\.(\d+)", out)
+        return (int(m.group(1)), int(m.group(2))) if m else None
+    except Exception:
+        return None
+
+def _cuda_ver(build):
+    return (int(build[2:-1]), int(build[-1]))          # "cu128" -> (12, 8)
+
+def candidate_cuda_builds(driver_cuda, compute_cap):
+    """CUDA builds of PyTorch worth trying, newest first, plus explanatory notes.
+    Driver: a build needs a driver that supports its CUDA version.
+    GPU: Blackwell (compute capability 12.x) has kernels only in CUDA 12.8+ builds; CUDA 13
+    builds dropped Maxwell/Pascal/Volta (compute capability below 7.5)."""
+    builds, notes = list(CUDA_BUILDS), []
+    if driver_cuda:
+        builds = [b for b in builds if _cuda_ver(b) <= driver_cuda]
+    if compute_cap and compute_cap >= (12, 0):
+        kept = [b for b in builds if _cuda_ver(b) >= (12, 8)]
+        if not kept:
+            notes.append("This GPU (RTX 50-series / Blackwell) needs PyTorch built for CUDA 12.8 or newer, "
+                         "which needs NVIDIA driver 570 or newer. Update the driver from nvidia.com and run "
+                         "this installer again.")
+        builds = kept
+    if compute_cap and compute_cap < (7, 5):
+        builds = [b for b in builds if _cuda_ver(b)[0] < 13]
+    return builds, notes
+
 def video_controllers():
     if os.name != "nt":
         return ""
@@ -118,22 +170,23 @@ def remove_existing_torch():
 
 def install_cuda():
     drv = driver_cuda_version()
+    cc = gpu_compute_capability()
     if drv:
         print(f"\nNVIDIA driver supports CUDA up to {drv[0]}.{drv[1]}")
-        builds = [b for b in CUDA_BUILDS if (int(b[2:-1]), int(b[-1])) <= drv]
     else:
         print("\nWARNING: nvidia-smi not found -- is the NVIDIA driver installed?")
         print("Trying CUDA builds anyway; if none work, CPU will be installed.")
-        builds = list(CUDA_BUILDS)
+    if cc:
+        print(f"GPU compute capability: {cc[0]}.{cc[1]}")
+    builds, notes = candidate_cuda_builds(drv, cc)
+    for n in notes:
+        print("\n" + n)
     for b in builds:
         print(f"\nTrying PyTorch with {b} ...")
         if not pip("install", "torch", "torchvision", "--index-url", TORCH_INDEX + b):
             print(f"  {b}: not available for this Python/PyTorch, trying the next one")
             continue
-        ok, out = python_check(
-            "import torch; assert torch.cuda.is_available(), 'CUDA not available'; "
-            "x = torch.ones(8, device='cuda') * 2; torch.cuda.synchronize(); "
-            "print(torch.__version__, '|', torch.cuda.get_device_name(0))")
+        ok, out = python_check(CUDA_SMOKE_TEST)
         if ok:
             print(f"  OK: {out}")
             return "cuda"

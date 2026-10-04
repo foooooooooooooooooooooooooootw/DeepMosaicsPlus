@@ -201,6 +201,114 @@ def mask_area(mask):
     return area
 
 
+# ---------------------------------------------------------------- image result files
+# Formats an image result can be saved as. 'alpha' = can the format store transparency.
+IMAGE_FORMATS = {
+    'jpg':  {'ext': '.jpg',  'alpha': False},
+    'png':  {'ext': '.png',  'alpha': True},
+    'webp': {'ext': '.webp', 'alpha': True},
+    'bmp':  {'ext': '.bmp',  'alpha': False},
+    # OpenCV writes TIFF alpha without the ExtraSamples tag that marks it as transparency, so other
+    # programs (Photoshop, ...) may treat it as an extra data channel. Flatten instead of shipping that.
+    'tiff': {'ext': '.tif',  'alpha': False},
+}
+_EXT_TO_FORMAT = {'.jpg': 'jpg', '.jpeg': 'jpg', '.jpe': 'jpg', '.png': 'png', '.webp': 'webp',
+                  '.bmp': 'bmp', '.tif': 'tiff', '.tiff': 'tiff'}
+_ALPHA_CAPABLE_INPUT = ('.png', '.webp', '.tif', '.tiff')    # inputs that may carry an alpha channel
+
+
+def output_format_for(src_path, requested='same'):
+    """Resolve --img_format: 'same' follows the input file's format (unknown -> jpg)."""
+    if requested and requested != 'same':
+        return requested
+    return _EXT_TO_FORMAT.get(os.path.splitext(src_path)[1].lower(), 'jpg')
+
+
+def read_image_alpha(file_path, shape):
+    """Alpha channel (uint8, HxW) of an image file, or None when it has none, is fully opaque, or
+    can't be matched to the colour image. imread() drops alpha, and IMREAD_UNCHANGED also drops EXIF
+    rotation, so the colour image is still read the normal way and the alpha separately."""
+    if os.path.splitext(file_path)[1].lower() not in _ALPHA_CAPABLE_INPUT:
+        return None
+    try:
+        raw = cv2.imdecode(np.fromfile(file_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    except Exception:
+        return None
+    if raw is None or raw.ndim != 3 or raw.shape[2] != 4:
+        return None
+    alpha = raw[:, :, 3]
+    if alpha.dtype == np.uint16:
+        alpha = (alpha // 257).astype(np.uint8)
+    elif alpha.dtype != np.uint8:
+        alpha = np.clip(alpha, 0, 255).astype(np.uint8)
+    if alpha.shape != tuple(shape[:2]):
+        print('Note: the transparency channel does not match the image (EXIF rotation?) -- it will not be kept.')
+        return None
+    return None if alpha.min() == 255 else alpha          # fully opaque: nothing to keep
+
+
+def imread_with_alpha(file_path):
+    """(BGR image, alpha or None). Same colour image impro.imread() gives."""
+    img = imread(file_path)
+    return img, read_image_alpha(file_path, img.shape)
+
+
+def parse_background(text):
+    """'#rrggbb' / '#rgb' / 'rrggbb' / 'r,g,b' -> (B, G, R). Invalid -> white, with a message."""
+    t = (text or '').strip()
+    try:
+        if ',' in t:
+            r, g, b = [int(v) for v in t.split(',')][:3]
+        else:
+            t = t.lstrip('#')
+            if len(t) == 3:
+                t = ''.join(c * 2 for c in t)
+            r, g, b = int(t[0:2], 16), int(t[2:4], 16), int(t[4:6], 16)
+            if len(t) != 6:
+                raise ValueError
+        return tuple(int(min(255, max(0, v))) for v in (b, g, r))
+    except Exception:
+        print(f"Note: could not read the background color {text!r}; using white.")
+        return (255, 255, 255)
+
+
+def flatten_alpha(img, alpha, background_bgr):
+    """Composite a BGR image with straight alpha over a solid colour."""
+    a = (alpha.astype(np.float32) / 255.0)[:, :, None]
+    bg = np.array(background_bgr, dtype=np.float32)[None, None, :]
+    return np.clip(img.astype(np.float32) * a + bg * (1.0 - a) + 0.5, 0, 255).astype(np.uint8)
+
+
+def save_result_image(opt, src_path, suffix, img, alpha=None):
+    """Write an image result next to the others in opt.result_dir as <name>_<suffix>.<ext> in the format
+    chosen by --img_format. Transparency from the input is kept for formats that can store it, and
+    composited onto --img_background for those that can't. Returns the written path."""
+    fmt = output_format_for(src_path, getattr(opt, 'img_format', 'same'))
+    ext = IMAGE_FORMATS[fmt]['ext']
+    if alpha is not None and alpha.shape != img.shape[:2]:
+        alpha = cv2.resize(alpha, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
+    if alpha is not None:
+        if IMAGE_FORMATS[fmt]['alpha']:
+            img = np.dstack([img, alpha])
+        else:
+            img = flatten_alpha(img, alpha, parse_background(getattr(opt, 'img_background', '#ffffff')))
+    quality = int(min(100, max(1, getattr(opt, 'img_quality', 95))))
+    params = {'jpg': [cv2.IMWRITE_JPEG_QUALITY, quality],
+              'png': [cv2.IMWRITE_PNG_COMPRESSION, int(min(9, max(0, getattr(opt, 'png_compression', 3))))],
+              'webp': [cv2.IMWRITE_WEBP_QUALITY, 101 if getattr(opt, 'webp_lossless', False) else quality],
+              }.get(fmt, [])
+    out_path = os.path.join(opt.result_dir, os.path.splitext(os.path.basename(src_path))[0] + '_' + suffix + ext)
+    ok, buf = cv2.imencode(ext, img, params)
+    if not ok:
+        print(f"Note: this OpenCV build could not encode {fmt.upper()}; saving as PNG instead.")
+        out_path = os.path.splitext(out_path)[0] + '.png'
+        ok, buf = cv2.imencode('.png', img)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    buf.tofile(out_path)       # tofile: also handles non-ASCII paths on Windows
+    print('Saved:', out_path)
+    return out_path
+
+
 def crop_mosaic_region(img, x, y, size):
     """Crop the square region centred on (x, y) with half-width `size`,
     clipped to the image bounds using EXACTLY the same math as

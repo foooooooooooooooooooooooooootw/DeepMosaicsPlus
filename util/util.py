@@ -19,7 +19,7 @@ def randomstr(num):
 def is_img(path):
     ext = os.path.splitext(path)[1]
     ext = ext.lower()
-    if ext in ['.jpg','.png','.jpeg','.bmp']:
+    if ext in ['.jpg','.png','.jpeg','.bmp','.webp','.tif','.tiff']:
         return True
     else:
         return False

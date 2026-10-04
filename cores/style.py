@@ -12,10 +12,10 @@ from .init import video_init
 '''
 def styletransfer_img(opt,netG):
     print('Style Transfer_img:',opt.media_path)
-    img = impro.imread(opt.media_path)
+    img, img_alpha = impro.imread_with_alpha(opt.media_path)
     img = runmodel.run_styletransfer(opt, netG, img)
     suffix = os.path.basename(opt.model_path).replace('.pth','').replace('style_','')
-    impro.imwrite(os.path.join(opt.result_dir,os.path.splitext(os.path.basename(opt.media_path))[0]+'_'+suffix+'.jpg'),img)
+    impro.save_result_image(opt, opt.media_path, suffix, img, img_alpha)
 
 def styletransfer_video(opt,netG):
     path = opt.media_path

@@ -70,6 +70,7 @@ random.shuffle(videopaths)
 net = loadmodel.bisenet(opt,'roi')
 
 result_cnt = opt.startcnt
+native_sides = []   # source-resolution side length of every saved crop (before resizing to --outsize)
 video_cnt = 1
 starttime = datetime.datetime.now()
 for videopath in videopaths:
@@ -187,6 +188,7 @@ for videopath in videopaths:
                     n_skipped_bounds += 1
                     continue
 
+                native_sides.append(min(y1 - y0, x1 - x0))
                 img = impro.resize(imgs[i][y0:y1,x0:x1],opt.outsize,interpolation=cv2.INTER_CUBIC)
                 mask = impro.resize(masks[i][y0:y1,x0:x1],opt.outsize,interpolation=cv2.INTER_CUBIC)
                 impro.imwrite(os.path.join(origindir,'%05d'%(i+1)+'.jpg'), img)
@@ -229,6 +231,16 @@ for videopath in videopaths:
     if opt.gpu_id != '-1':
         torch.cuda.empty_cache()
 
+if native_sides:
+    ns = np.array(native_sides)
+    below = 100.0 * (ns < opt.outsize).mean()
+    print(f"\nCrop sizes in your source footage: median {int(np.median(ns))}px "
+          f"(25th-75th percentile {int(np.percentile(ns, 25))}-{int(np.percentile(ns, 75))}px). "
+          f"{below:.0f}% of crops are smaller than --outsize {opt.outsize} and were ENLARGED to reach it.")
+    if below > 50:
+        print(f"  Most crops had to be enlarged, so a model trained at {opt.outsize}px is not getting extra detail "
+              f"from this footage. Detail only improves if most crops are at least as large as the training size "
+              f"(roughly: --outsize {int(np.percentile(ns, 25))} or less).")
 n_succeeded = result_cnt - opt.startcnt
 print(f"\nDone: {n_succeeded}/{len(videopaths)} video(s) produced output under {opt.savedir}.")
 if n_succeeded == 0:

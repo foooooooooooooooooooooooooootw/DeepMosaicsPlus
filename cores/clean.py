@@ -79,6 +79,16 @@ def _manifest_pct_bounds(manifest_path):
     except Exception:
         return None, None
 
+def _adopt_checkpoint_size(opt, model_path):
+    """A bucket model may have been trained at a different input size than the
+    default model; run it at the size it was trained at (unless --infer_size
+    was given explicitly)."""
+    from models import model_util
+    size = model_util.checkpoint_input_size(model_path)
+    if size and not int(getattr(opt, 'infer_size', 0) or 0) and size != getattr(opt, 'input_size', 256):
+        print(f"[auto_model] {os.path.basename(model_path)} was trained at {size}px -> running it at {size}px")
+        opt.input_size = size
+
 def select_netG_for_size(opt, netG, img, mask):
     """Single-image/frame version: if --auto_model is set, estimate the
     mosaic block size from (img, mask) and swap in the matching pretrained
@@ -99,6 +109,7 @@ def select_netG_for_size(opt, netG, img, mask):
         square_note = '' if est['is_square'] else ' (non-square block detected — verify manually)'
         print(f"[auto_model] detected mosaic block ~{est['pct']:.2f}% of frame{square_note} "
               f"-> using {bucket:g}% bucket model ({os.path.basename(model_path)})")
+        _adopt_checkpoint_size(opt, model_path)
         return _load_netG_cached(opt, model_path)
     except Exception as e:
         print(f"[auto_model] selection failed ({e}), keeping current model")
@@ -151,6 +162,7 @@ def select_netG_for_size_video(opt, netG, imagepaths, positions):
         print(f"[auto_model] detected mosaic block ~{result['pct']:.2f}% of frame "
               f"(from {result['n_samples']} sampled frames){square_note} "
               f"-> using {bucket:g}% bucket model ({os.path.basename(model_path)})")
+        _adopt_checkpoint_size(opt, model_path)
         return _load_netG_cached(opt, model_path)
     except Exception as e:
         print(f"[auto_model] selection failed ({e}), keeping current model")
@@ -312,7 +324,7 @@ def cleanmosaic_img(opt,netG,netM):
 
     path = opt.media_path
     print('Clean Mosaic:',path)
-    img_origin = impro.imread(path)
+    img_origin, img_alpha = impro.imread_with_alpha(path)     # alpha is re-attached to the result
     mask, x, y, size = runmodel.get_mosaic_position(img_origin,netM,opt)
     img_result = img_origin.copy()
     # Clipped crop -- see impro.crop_mosaic_region for why a raw slice is wrong near edges
@@ -329,7 +341,7 @@ def cleanmosaic_img(opt,netG,netM):
         img_result = impro.replace_mosaic(img_origin, img_fake, mask, x, y, size, opt.no_feather, luma_sharpen_amount=getattr(opt,"luma_sharpen_amount",0.0) if getattr(opt,"luma_sharpen",False) else 0.0, bilateral_sharpen_amount=getattr(opt,"bilateral_sharpen_amount",0.0) if getattr(opt,"bilateral_sharpen",False) else 0.0, freq_inject_amount=getattr(opt,"freq_inject_amount",0.0) if getattr(opt,"freq_inject",False) else 0.0)
     else:
         print('Do not find mosaic')
-    impro.imwrite(os.path.join(opt.result_dir,os.path.splitext(os.path.basename(path))[0]+'_clean.jpg'),img_result)
+    impro.save_result_image(opt, path, 'clean', img_result, img_alpha)
 
 def cleanmosaic_img_server(opt,img_origin,netG,netM):
     mask, x, y, size = runmodel.get_mosaic_position(img_origin,netM,opt)
@@ -549,7 +561,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     N, T, S = 2, 5, 3
     LEFT_FRAME = (N * S)
     POOL_NUM = LEFT_FRAME * 2 + 1
-    INPUT_SIZE = 256
+    INPUT_SIZE = int(getattr(opt, 'input_size', 256))   # see model_util.resolve_model_input_size
     FRAME_POS = np.linspace(0, (T-1)*S, T, dtype=np.int64)
     
     # Pre-allocate arrays to avoid repeated memory allocation
@@ -564,6 +576,11 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     start_frame = int(imagepaths[0][7:13])
     positions = get_mosaic_positions(opt, netM, imagepaths, savemask=True)[(start_frame-1):]
     netG = select_netG_for_size_video(opt, netG, imagepaths, positions)
+    if int(getattr(opt, 'input_size', 256)) != INPUT_SIZE:
+        # --auto_model picked a bucket model trained at a different size
+        INPUT_SIZE = int(opt.input_size)
+        input_stream_array = np.empty((1, T, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
+        temp_crop = np.empty((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
     t1 = time.time()
     
     if not opt.no_preview:

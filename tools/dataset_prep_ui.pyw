@@ -27,7 +27,7 @@ try:
     from PyQt6.QtGui import QFont, QColor
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QLineEdit, QPushButton, QFileDialog, QSpinBox, QDoubleSpinBox, QCheckBox,
+        QLabel, QLineEdit, QPushButton, QFileDialog, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
         QTableWidget, QTableWidgetItem, QTextEdit, QPlainTextEdit, QTabWidget,
         QGroupBox, QHeaderView, QMessageBox, QAbstractItemView,
     )
@@ -52,11 +52,25 @@ DEFAULTS = {
     'gpu_id': '0',
     'batchsize': 8,
     'n_epoch': 200,
+    'model_size': 256,
+    'built_outsize': 0,
     'save_freq': 1000,
     'scene_accept_ratio': 1.0,
     'extra_dataset_args': '',
     'extra_train_args': '',
 }
+
+MODEL_SIZES = (256, 384, 512)
+# Measured memory for one training step (generator + discriminator + VGG loss), GB per sample,
+# by model size. Measured on CPU, so treat as a guide: GPU memory differs somewhat.
+GB_PER_SAMPLE = {256: 0.6, 384: 1.3, 512: 2.3}
+
+def loadsize_for(size):
+    """Frames are resized to this before the random crop: the original 256 -> 286 ratio."""
+    return int(round(size * 286 / 256))
+
+def max_batch(vram_gb, size):
+    return max(1, int((vram_gb * 0.85 - 1.0) / GB_PER_SAMPLE[size]))
 
 VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')
 
@@ -139,7 +153,7 @@ def path_row(label_text, key, browse_mode='dir'):
 class DatasetPrepWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DeepMosaicsPlus 1.2.0 — Dataset Prep & Training")
+        self.setWindowTitle("DeepMosaicsPlus 1.2.1 — Dataset Prep & Training")
         self.resize(1040, 780)
         self.cfg = load_config()
         self._process = None
@@ -221,6 +235,19 @@ class DatasetPrepWindow(QMainWindow):
         self.epoch_spin = QSpinBox()
         self.epoch_spin.setRange(1, 100000)
         grid.addWidget(self.epoch_spin, r, 1)
+        r += 1
+
+        grid.addWidget(QLabel("Model input size (px):"), r, 0)
+        self.model_size_combo = QComboBox()
+        for sz in MODEL_SIZES:
+            self.model_size_combo.addItem(str(sz), sz)
+        self.model_size_combo.currentIndexChanged.connect(self._update_size_hint)
+        self.batchsize_spin.valueChanged.connect(self._update_size_hint)
+        grid.addWidget(self.model_size_combo, r, 1)
+        r += 1
+        self.size_hint = QLabel("")
+        self.size_hint.setWordWrap(True)
+        grid.addWidget(self.size_hint, r, 0, 1, 3)
         r += 1
 
         grid.addWidget(QLabel("Save checkpoint every N iterations (--save_freq):"), r, 0)
@@ -348,6 +375,19 @@ class DatasetPrepWindow(QMainWindow):
         return w
 
     # ------------------------------------------------------------ config --
+    def _update_size_hint(self, *_):
+        size = self.model_size_combo.currentData() or 256
+        load = loadsize_for(size)
+        fits = ", ".join(f"{g} GB -> {max_batch(g, size)}" for g in (4, 8, 11, 24))
+        text = (f"Frames are stored/cropped at {load}px and the network trains on {size}px crops. "
+                f"About {GB_PER_SAMPLE[size]:.1f} GB of GPU memory per sample. Rough largest batch size "
+                f"by card: {fits}. (Current batch size: {self.batchsize_spin.value()}.)")
+        if size != 256:
+            text += (" Changing the size means REBUILDING the datasets (steps 1 and 2): crops stored at a "
+                     "smaller size would only be enlarged. A larger model also only helps if your footage's "
+                     "mosaic regions are at least that big in pixels -- step 2 reports this.")
+        self.size_hint.setText(text)
+
     def _load_into_ui(self):
         for key, edit in self._path_fields.items():
             edit.setText(self.cfg.get(key, ''))
@@ -356,6 +396,9 @@ class DatasetPrepWindow(QMainWindow):
         self.gpu_edit.setText(str(self.cfg.get('gpu_id', '0')))
         self.batchsize_spin.setValue(self.cfg.get('batchsize', 8))
         self.epoch_spin.setValue(self.cfg.get('n_epoch', 200))
+        idx = self.model_size_combo.findData(self.cfg.get('model_size', 256))
+        self.model_size_combo.setCurrentIndex(max(0, idx))
+        self._update_size_hint()
         self.save_freq_spin.setValue(self.cfg.get('save_freq', 1000))
         self.scene_accept_spin.setValue(self.cfg.get('scene_accept_ratio', 1.0))
         self.extra_dataset_edit.setText(self.cfg.get('extra_dataset_args', ''))
@@ -370,6 +413,7 @@ class DatasetPrepWindow(QMainWindow):
         self.cfg['gpu_id'] = self.gpu_edit.text().strip()
         self.cfg['batchsize'] = self.batchsize_spin.value()
         self.cfg['n_epoch'] = self.epoch_spin.value()
+        self.cfg['model_size'] = self.model_size_combo.currentData() or 256
         self.cfg['save_freq'] = self.save_freq_spin.value()
         self.cfg['scene_accept_ratio'] = self.scene_accept_spin.value()
         self.cfg['extra_dataset_args'] = self.extra_dataset_edit.text().strip()
@@ -597,7 +641,9 @@ class DatasetPrepWindow(QMainWindow):
                '--model_manifest', cfg['model_manifest'],
                '--fps', str(cfg['fps']),
                '--reuse_uncensored_for_synthetic', 'yes' if cfg['reuse_uncensored'] else 'no',
-               '--synthetic_source_dir', cfg['synthetic_source_dir']]
+               '--synthetic_source_dir', cfg['synthetic_source_dir'],
+               '--outsize', str(loadsize_for(cfg['model_size']))]
+        self.cfg['built_outsize'] = loadsize_for(cfg['model_size']); save_config(self.cfg)
         self._run_command(cmd, cwd=ROOT)
 
     def _run_make_synthetic(self):
@@ -613,7 +659,9 @@ class DatasetPrepWindow(QMainWindow):
                '--savedir', cfg['synthetic_pool_dir'],
                '--model_path', cfg['roi_model_path'],
                '--fps', str(cfg['fps']),
-               '--scene_accept_ratio', str(cfg['scene_accept_ratio'])]
+               '--scene_accept_ratio', str(cfg['scene_accept_ratio']),
+               '--outsize', str(loadsize_for(cfg['model_size']))]
+        self.cfg['built_outsize'] = loadsize_for(cfg['model_size']); save_config(self.cfg)
         if self.extra_dataset_edit.text().strip():
             cmd += self.extra_dataset_edit.text().strip().split()
         self._run_command(cmd, cwd=os.path.join(ROOT, 'make_datasets'))
@@ -621,6 +669,18 @@ class DatasetPrepWindow(QMainWindow):
     def _run_train_all(self):
         self._save_from_ui()
         cfg = self.cfg
+        load = loadsize_for(cfg['model_size'])
+        built = cfg.get('built_outsize', 0)
+        if built and built != load:
+            ans = QMessageBox.question(self, "Datasets were built at a different size",
+                f"Your datasets were last built with crops of {built}px, but training at {cfg['model_size']}px "
+                f"needs {load}px.\n\nFrames would be resized {load/built:.1f}x"
+                f"{' (enlarged: no extra detail, more memory)' if load > built else ' (shrunk: detail is thrown away)'}."
+                f"\n\nRebuild steps 1 and 2 first, or continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if ans != QMessageBox.StandardButton.Yes:
+                return
         cmd = [resolve_python_exe(), os.path.join(ROOT, 'tools', 'train_all_buckets.py'),
                '--synthetic_dataset', cfg['synthetic_pool_dir'],
                '--real_pairs_dataset', cfg['real_pairs_dir'],
@@ -628,7 +688,8 @@ class DatasetPrepWindow(QMainWindow):
                '--work_dir', os.path.join(ROOT, 'datasets', '_merged'),
                '--']
         cmd += ['--gpu_id', cfg['gpu_id'], '--batchsize', str(cfg['batchsize']), '--n_epoch', str(cfg['n_epoch']),
-                '--save_freq', str(cfg['save_freq'])]
+                '--save_freq', str(cfg['save_freq']),
+                '--finesize', str(cfg['model_size']), '--loadsize', str(load)]
         if self.extra_train_edit.text().strip():
             cmd += self.extra_train_edit.text().strip().split()
         self._run_command(cmd, cwd=ROOT)

@@ -1,27 +1,51 @@
-DeepMosaicsPlus: 1.2.0 (fork of DeepMosaics 0.5.1)
-For more detail, please view on github: https://github.com/foooooooooooooooooooooooooootw/DeepMosaicsPlus
+DeepMosaicsPlus: 1.2.1 (fork of DeepMosaics 0.5.1)
+For more detail, please view on github: https://github.com/HypoX64/DeepMosaics
 
 Releases History
+  V1.2.1 (DeepMosaicsPlus)
+    New:
+      1. Add new formats for images (PNG, WebP, TIFF). WebP and PNG support transparency.
+      2. Experimental new option added to model trainer that increases resolution of training data
+    
+    Fix:
+      1. Fstring backslash deleted. Now it's compatible with Python 3.8 and doesn't require 3.12 anymore. 
+      2. Removed deepmosaicui.pyw since it was redundant
+
   V1.2.0 (DeepMosaicsPlus)
     New:
       1.Configurable video codec on output encode: h264 / hevc / av1 / vp9 / h264_nvenc / hevc_nvenc
       2.Per-codec default CRF/CQ values (CRF scales differ between encoders)
-      3.Clear preflight error when ffmpeg/ffprobe are missing, instead of a bare OS error deep in processing
-      4.GIF input support: processed as video, output converted back to a looping GIF with a lossless path (PNG frames + lossless intermediate)
-      5.Image and GIF previews in the GUI, with Detection/Cleaned toggle to compare before and after
-      6.Inference device badge in the GUI (CUDA / DirectML / CPU), reported by the run itself
-      7.DirectML: --gpu_id selects the DirectML device; the cleaning model and image path run on the GPU (previously CPU)
-      8.Options that don't apply to images or GIFs are greyed out in the GUI
-      9.Frames are kept after a run so the preview can be scrubbed (cleared when the program closes); "Finished" overlay on the last frame
-      10.Dataset tool: --save_freq and --scene_accept_ratio settings; video models can clean single images
-      11.Installer detects the GPU and installs a working PyTorch build (verified on the GPU); requirements.txt; launchers that use the installer's Python (works with venvs)
+      3.Modern 3-panel GUI with slider + editable spinbox for CRF, live preview, and seek bar
+      4.Clear preflight error when ffmpeg/ffprobe are missing, instead of a bare OS error deep in processing
+      5.Traditional (non-AI) mosaic cleaning path, luma/bilateral sharpening, frequency injection post-processing
+      6.GIF input support: processed as video, output converted back to a looping GIF with a lossless path (PNG frames + lossless intermediate)
+      7.Image and GIF previews in the GUI, with Detection/Cleaned toggle to compare before and after
+      8.Inference device badge in the GUI (CUDA / DirectML / CPU), reported by the run itself
+      9.DirectML: --gpu_id selects the DirectML device; the cleaning model and image path run on the GPU (previously CPU)
+      10.Options that don't apply to images or GIFs are greyed out in the GUI
+      11.Frames are kept after a run so the preview can be scrubbed (cleared when the program closes); "Finished" overlay on the last frame
+      12.Dataset tool: --save_freq and --scene_accept_ratio settings; video models can clean single images
+      13.Installer detects the GPU and installs a working PyTorch build (verified on the GPU); requirements.txt; launchers that use the installer's Python (works with venvs)
+      14.GIF inputs can be saved as GIF (default) or MP4 (--gif_to_mp4 / GUI checkbox)
+      15.Train and run the video model at other sizes (256/384/512): --finesize (--loadsize is automatic); the size is recorded next to each checkpoint (model_info.json) and read at inference; --infer_size / GUI "Model input size" override it; dataset tool has a model-size selector with memory guidance
+      16.Dataset builder reports how large the mosaic crops are in your footage and warns when training would only enlarge them
+      17.NVIDIA RTX 50-series (Blackwell) support: startup GPU self-test explains an unusable CUDA build in plain language and falls back to CPU; installer chooses PyTorch builds by GPU generation (Blackwell needs CUDA 12.8+, CUDA 13 builds dropped GTX 10/V100); tools/check_gpu.py diagnoses CUDA problems (driver, build, torchvision mismatch)
+      18.Image results can be saved as JPG / PNG / WebP / BMP / TIFF (--img_format, default: same as the input), with --img_quality, --png_compression, --webp_lossless; PNG and WebP keep transparency, other formats fill it with --img_background; settings appear in the GUI for image inputs; WebP and TIFF inputs are now recognised
     Fix:
-      1.Installer installed CPU-only PyTorch for NVIDIA GPUs on Windows; GUI launched deepmosaic.py with whichever Python was first on PATH (could silently run on CPU)
-      2.Hardware video decode crashed on systems where the decoder isn't usable; now falls back to software
-      3.Videos with no audio track crashed; GIF/image runs no longer require ffmpeg
-      4.Windows: startup work was repeated in every frame-extraction worker (log spam, slow extraction)
-      5.Log no longer jumps to the bottom while scrolled up; missing preview during frame extraction
-
+      1.--encode_crf was defined but never actually passed to the video encoder; now wired through correctly
+      2.Frame extraction dropped or duplicated frames at segment boundaries (short clips lost up to ~20% of frames)
+      3.Cleaning images near the frame edge produced zoomed/distorted output; "No edge feathering" replaced the whole region instead of only the mosaic
+      4.Installer installed CPU-only PyTorch for NVIDIA GPUs on Windows; GUI launched deepmosaic.py with whichever Python was first on PATH (could silently run on CPU)
+      5.DirectML: video model failed (Conv3d, inference tensors) and produced noisy output (DirectML's bilinear upsample); both replaced with exact equivalents
+      6.Hardware video decode crashed on systems where the decoder isn't usable; now falls back to software
+      7.Videos with no audio track crashed; GIF/image runs no longer require ffmpeg
+      8.Windows: startup work was repeated in every frame-extraction worker (log spam, slow extraction)
+      9.Log no longer jumps to the bottom while scrolled up; missing preview during frame extraction
+      10.Files with brackets or non-ASCII characters in the name: GIF results were left as MP4, and the real error was hidden behind "generator didn't stop after throw()"
+      11.Videos are encoded as standard yuv420p (widely playable); previously 4:4:4 for PNG frames or full-range yuvj420p for JPEG frames
+      12.Real pairs were stored as full frames instead of crops around the mosaic (wrong block scale for training, and random crops often missed the mosaic); tools/bucket_real_pairs.py now crops pairs to the mosaic region (--outsize, --no_crop to keep old behaviour)
+      13.Modern GUI failed to start on Python 3.11 and older (SyntaxError: backslash inside an f-string, only allowed on 3.12+); all code now compiles on Python 3.8-3.12
+      14.Image results were always saved as JPG, so transparency in PNG/WebP inputs was lost
   V0.5.1
     Fix:
       1.Fix Some BUGs when restore unfinished tasks.

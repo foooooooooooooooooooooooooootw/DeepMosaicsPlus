@@ -1,5 +1,5 @@
 """
-DeepMosaicsPlus 1.2.0 — Modern 3-panel workstation UI
+DeepMosaicsPlus 1.2.1 — Modern 3-panel workstation UI
 Layout: Left sidebar (config) · Centre (frame viewport) · Bottom (run bar + log)
 
 Run with:  python deepmosaicui_qt2.py
@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QPlainTextEdit, QScrollArea, QFrame,
     QGroupBox, QSizePolicy, QFileDialog,
     QButtonGroup, QAbstractButton, QMessageBox, QDialog,
-    QDialogButtonBox, QSizeGrip, QSpinBox,
+    QDialogButtonBox, QSizeGrip, QSpinBox, QColorDialog,
 )
 
 # ── Palette tokens ─────────────────────────────────────────────────────────────
@@ -538,6 +538,15 @@ class OverlayBar(QWidget):
 
 
 # ── Sidebar helpers ────────────────────────────────────────────────────────────
+# Image result formats (matches util/image_processing.py). PNG and WebP keep transparency;
+# JPG, BMP and TIFF can't, so transparent areas are filled with a background colour.
+IMG_FORMAT_CHOICES = [("Same as input", "same"), ("JPG", "jpg"), ("PNG", "png"),
+                      ("WebP", "webp"), ("BMP", "bmp"), ("TIFF", "tiff")]
+IMG_EXT_FORMAT = {".jpg": "jpg", ".jpeg": "jpg", ".jpe": "jpg", ".png": "png", ".webp": "webp",
+                  ".bmp": "bmp", ".tif": "tiff", ".tiff": "tiff"}
+IMG_FORMAT_EXT = {"jpg": ".jpg", "png": ".png", "webp": ".webp", "bmp": ".bmp", "tiff": ".tif"}
+IMG_ALPHA_FORMATS = ("png", "webp")
+
 def _section(title: str) -> QLabel:
     l = QLabel(title)
     l.setObjectName("section_head")
@@ -728,7 +737,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DeepMosaicsPlus 1.2.0")
+        self.setWindowTitle("DeepMosaicsPlus 1.2.1")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(1100, 700)
         self.resize(1280, 820)
@@ -790,7 +799,7 @@ class MainWindow(QMainWindow):
         )
         tb.addWidget(app_lbl)
 
-        ver_lbl = QLabel("v1.2.0")
+        ver_lbl = QLabel("v1.2.1")
         ver_lbl.setStyleSheet(
             f"font-size: 11px; color: {C['text_dim']}; background: transparent;"
             f" margin-left: 6px;"
@@ -1032,6 +1041,14 @@ class MainWindow(QMainWindow):
         mlb = _browse()
         mlb.clicked.connect(lambda: self._pick_file(self.model_in, "Select model", "Models (*.pth)"))
         sb.addLayout(_row(_rl("Model"), self.model_in, mlb))
+        self.infer_size_sel = QComboBox()
+        self.infer_size_sel.addItems(["Auto", "256", "384", "512"])
+        self.infer_size_sel.setToolTip(
+            "Input size the video model runs at.\n"
+            "Auto: the size recorded next to the model (model_info.json from training), else 256.\n"
+            "Set it by hand if a model was trained at another size and its .json is missing --\n"
+            "running a model at a different size than it was trained at gives worse results.")
+        sb.addLayout(_row(_rl("Model input size"), self.infer_size_sel, None))
 
         # Result
         self.result_in = _inp("Output folder…", "./result")
@@ -1040,6 +1057,7 @@ class MainWindow(QMainWindow):
         sb.addLayout(_row(_rl("Result folder"), self.result_in, rlb))
 
         # ── Config ────────────────────────────────────────────────────────────
+        img_group_index = sb.count()     # the Image output section is inserted here (above Config) below
         sb.addWidget(_section("Config"))
 
         self.gpu_in  = _inp("-1 for CPU", "0", 58)
@@ -1070,7 +1088,8 @@ class MainWindow(QMainWindow):
         self.gif_out_cb.setChecked(True)
         self.gif_out_cb.setToolTip("Ticked: a GIF input is saved as a GIF (lossless processing, then a\n"
                                    "256-colour palette). Unticked: saved as an MP4 using the codec and CRF below.")
-        self.gif_out_cb.setEnabled(False)          # enabled only while a GIF is selected
+        self.gif_out_cb.setEnabled(False)          # enabled and shown only while a GIF is selected
+        self.gif_out_cb.hide()
         self.gif_out_cb.toggled.connect(lambda _: self._update_media_type_options(self.media_in.text()))
         sb.addWidget(self.gif_out_cb)
         sb.addLayout(_row(_rl("Video Codec"), self.vcodec_sel, None))
@@ -1139,6 +1158,46 @@ class MainWindow(QMainWindow):
         self._media_type_hint.setWordWrap(True)
         self._media_type_hint.hide()
         sb.addWidget(self._media_type_hint)
+
+        # ── Image output (shown only when the input is an image) ──────────────
+        self._img_group = QWidget()
+        ig = QVBoxLayout(self._img_group)
+        ig.setContentsMargins(0, 0, 0, 0)
+        ig.setSpacing(6)
+        ig.addWidget(_section("Image output"))
+        self.img_fmt_sel = QComboBox()
+        for label, key in IMG_FORMAT_CHOICES:
+            self.img_fmt_sel.addItem(label, key)
+        ig.addLayout(_row(_rl("Format"), self.img_fmt_sel, None))
+        self.img_quality = QSpinBox()
+        self.img_quality.setRange(1, 100); self.img_quality.setValue(95); self.img_quality.setFixedWidth(58)
+        self.img_quality.setStyleSheet(self.encode_crf.styleSheet())
+        ig.addLayout(_row(_rl("Quality"), self.img_quality, None))
+        self.webp_lossless_cb = QCheckBox("Lossless WebP")
+        ig.addWidget(self.webp_lossless_cb)
+        self.png_comp = QSpinBox()
+        self.png_comp.setRange(0, 9); self.png_comp.setValue(3); self.png_comp.setFixedWidth(58)
+        self.png_comp.setStyleSheet(self.encode_crf.styleSheet())
+        ig.addLayout(_row(_rl("PNG compression"), self.png_comp, None))
+        self.img_bg_in = _inp("#rrggbb", "#ffffff", 84)
+        self._img_bg_swatch = QLabel()
+        self._img_bg_swatch.setFixedSize(18, 18)
+        self.img_bg_btn = _browse()
+        self.img_bg_btn.setText("Pick")
+        self.img_bg_btn.clicked.connect(self._pick_img_bg)
+        ig.addLayout(_row(_rl("Fill transparent"), self.img_bg_in, self._img_bg_swatch, self.img_bg_btn, None))
+        self._img_fmt_hint = _hint("")
+        self._img_fmt_hint.setWordWrap(True)
+        ig.addWidget(self._img_fmt_hint)
+        for w in (self.img_fmt_sel,):
+            w.currentIndexChanged.connect(self._update_image_options)
+        self.webp_lossless_cb.toggled.connect(self._update_image_options)
+        self.img_bg_in.textChanged.connect(self._update_image_options)
+        # Inserted ABOVE the Config section (not appended here): for an image the output format is
+        # the setting you actually want, ahead of the video/timing options. It is built down here
+        # only because its spin boxes borrow their style from the CRF box created in Config.
+        sb.insertWidget(img_group_index, self._img_group)
+        self._img_group.hide()
 
         # ── Detection ─────────────────────────────────────────────────────────
         sb.addWidget(_section("Detection"))
@@ -1236,6 +1295,22 @@ class MainWindow(QMainWindow):
         if d and d != "00:00:00" and self.dur_in.isEnabled():   cmd.extend(["-t", d])
         mdl = self.model_in.text().strip()
         if mdl:                             cmd.extend(["--model_path", mdl])
+        media_text = self.media_in.text().strip().strip('"')
+        if self._is_image(media_text):
+            fmt = self.img_fmt_sel.currentData()
+            if fmt != "same":
+                cmd.extend(["--img_format", fmt])
+            if self.img_quality.isEnabled() and self.img_quality.value() != 95:
+                cmd.extend(["--img_quality", str(self.img_quality.value())])
+            if self.png_comp.isEnabled() and self.png_comp.value() != 3:
+                cmd.extend(["--png_compression", str(self.png_comp.value())])
+            if self.webp_lossless_cb.isEnabled() and self.webp_lossless_cb.isChecked():
+                cmd.append("--webp_lossless")
+            bg = self.img_bg_in.text().strip()
+            if self.img_bg_in.isEnabled() and bg and bg.lower() != "#ffffff":
+                cmd.extend(["--img_background", bg])
+        if self.infer_size_sel.currentText() != "Auto":
+            cmd.extend(["--infer_size", self.infer_size_sel.currentText()])
         r = self.result_in.text().strip()
         if r:                               cmd.extend(["--result_dir", r])
         ng = self.netg_sel.currentText()
@@ -1317,7 +1392,44 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _is_image(path: str) -> bool:
-        return Path(path).suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+        return Path(path).suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
+
+    def _pick_img_bg(self):
+        cur = QColor(self.img_bg_in.text().strip() or "#ffffff")
+        col = QColorDialog.getColor(cur if cur.isValid() else QColor("#ffffff"), self,
+                                    "Fill color for transparent areas")
+        if col.isValid():
+            self.img_bg_in.setText(col.name())
+
+    def _update_image_options(self, *_):
+        """Show the Image output settings only for image inputs, and enable only the ones the chosen
+        format actually uses (the 'Same as input' format is worked out from the file's extension)."""
+        path = self.media_in.text().strip().strip('"')
+        is_img = self._is_image(path) or Path(path).suffix.lower() in (".tif", ".tiff")
+        self._img_group.setVisible(is_img)
+        if not is_img:
+            return
+        requested = self.img_fmt_sel.currentData()
+        fmt = requested if requested != "same" else IMG_EXT_FORMAT.get(Path(path).suffix.lower(), "jpg")
+        lossy = fmt == "jpg" or (fmt == "webp" and not self.webp_lossless_cb.isChecked())
+        self.img_quality.setEnabled(lossy)
+        self.webp_lossless_cb.setEnabled(fmt == "webp")
+        self.webp_lossless_cb.setVisible(fmt == "webp")
+        self.png_comp.setEnabled(fmt == "png")
+        no_alpha = fmt not in IMG_ALPHA_FORMATS
+        self.img_bg_in.setEnabled(no_alpha)
+        self.img_bg_btn.setEnabled(no_alpha)
+        col = QColor(self.img_bg_in.text().strip() or "#ffffff")
+        self._img_bg_swatch.setStyleSheet(
+            f"background: {col.name() if col.isValid() else '#ffffff'}; border: 1px solid {C['border2']}; border-radius: 3px;"
+            + ("" if no_alpha else " opacity: 0.35;"))
+        self._img_bg_swatch.setEnabled(no_alpha)
+        out = f"{Path(path).stem}_clean{IMG_FORMAT_EXT[fmt]}"
+        if no_alpha:
+            self._img_fmt_hint.setText(f"Saves as {out}. {fmt.upper()} can't store transparency: transparent areas "
+                                       f"(if the image has any) are filled with the color above.")
+        else:
+            self._img_fmt_hint.setText(f"Saves as {out}. {fmt.upper()} keeps transparency.")
 
     def _update_media_type_options(self, path: str):
         """Grey out options that don't apply to the selected media type.
@@ -1325,11 +1437,13 @@ class MainWindow(QMainWindow):
         GIFs: trimming and FPS still apply. Saved as GIF (default), codec/CRF
         are replaced by the automatic lossless GIF path; saved as MP4, codec/CRF
         decide the output. Decode QV never applies (GIFs always use PNG frames)."""
+        self._update_image_options()   # show/hide + enable the Image output settings
         ext = Path(path.strip().strip('"')).suffix.lower()
         is_image = self._is_image(path.strip().strip('"'))
         is_gif = ext == ".gif"
         gif_as_gif = is_gif and self.gif_out_cb.isChecked()
         self.gif_out_cb.setEnabled(is_gif)
+        self.gif_out_cb.setVisible(is_gif)
         for w in (self.vcodec_sel, self.encode_crf_sl, self.encode_crf):
             w.setEnabled(not (is_image or gif_as_gif))
         self.decode_qv.setEnabled(not (is_image or is_gif))
@@ -1814,9 +1928,12 @@ class MainWindow(QMainWindow):
 
         # Auto-answer the resume prompt
         if "unfinished" in data.lower() and "y/n" in data.lower():
-            answer = b"y\n" if self._resume_choice == "resume" else b"n\n"
-            self._process.write(answer)
-            self._log_sig.emit(f"→ Auto-answered: {'y (resume)' if answer == b'y\\n' else 'n (fresh start)'}\n")
+            resume = self._resume_choice == "resume"
+            self._process.write(b"y\n" if resume else b"n\n")
+            # (kept out of the f-string: a backslash inside an f-string expression is a
+            #  SyntaxError on Python 3.11 and older -- only 3.12+ allows it)
+            status = "y (resume)" if resume else "n (fresh start)"
+            self._log_sig.emit(f"→ Auto-answered: {status}\n")
 
         # Parse frame progress from \rN/TOTAL progress lines.
         # Exclude extraction tqdm lines ("Extracting frames: 42%|...") and step lines (N/4).
@@ -1921,7 +2038,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DeepMosaicsPlus")
-    app.setApplicationVersion("1.2.0")
+    app.setApplicationVersion("1.2.1")
     app.setStyleSheet(QSS)
     for family in ("Inter", "Segoe UI", "SF Pro Text", "Helvetica Neue"):
         if family in QFontDatabase.families():

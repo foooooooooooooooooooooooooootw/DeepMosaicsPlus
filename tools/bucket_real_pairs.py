@@ -48,12 +48,16 @@ import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import random
+import numpy as np
 import cv2
+from tqdm import tqdm
 from cores import Options
 from models import loadmodel, runmodel
 from util import mosaic as mosaic_util
 from util import ffmpeg as ffmpeg_util
 from util import util as util_
+from util import image_processing as impro
 
 
 def find_pairs(censored_dir, uncensored_dir):
@@ -74,6 +78,85 @@ def find_pairs(censored_dir, uncensored_dir):
         print(f"Note: {len(only_uncensored)} file(s) in uncensored/ have no matching filename in "
               f"censored/, skipped: {sorted(only_uncensored)}")
     return pairs
+
+
+def _edge_median(values, window):
+    """Sliding median with edge replication (util.filt.medfilt pads with zeros,
+    which drags the first/last positions toward 0)."""
+    if window <= 1 or len(values) < window:
+        return values
+    pad = window // 2
+    padded = np.pad(values, pad, mode='edge')
+    return np.array([np.median(padded[i:i + window]) for i in range(len(values))], dtype=values.dtype)
+
+
+def crop_pair_to_mosaic(netM, opt, origin_dir, mosaic_dir, outsize, ex_range=(1.2, 1.7)):
+    """Crop every frame of a pair to the mosaic region and resize to outsize x outsize.
+
+    Extraction leaves FULL frames. The synthetic dataset (make_video_dataset.py)
+    and the cleaner at inference both work on a crop around the mosaic region,
+    so full frames teach the network the wrong thing: the mosaic is a small part
+    of the training crop and its blocks are the wrong size relative to what it
+    sees later (4x off for small mosaics), and a random crop of a wide frame
+    often misses the mosaic altogether.
+
+    The box is located on the CENSORED frames (that's where the mosaic is), and
+    the SAME box is applied to the matching uncensored frame, so the pair stays
+    pixel-aligned. Positions are median-filtered over time to remove jitter,
+    gaps carry the nearest detection, and the box is kept square and fully
+    inside the frame. Returns stats, or None if no mosaic was found.
+    """
+    names = sorted(f for f in os.listdir(mosaic_dir) if f.lower().endswith('.jpg'))
+    n_orig = len([f for f in os.listdir(origin_dir) if f.lower().endswith('.jpg')])
+    names = names[:min(len(names), n_orig)]
+    n = len(names)
+    if n == 0:
+        return None
+    min_size = getattr(opt, 'min_mosaic_size', 100)
+    pos = np.zeros((n, 3), dtype=np.int64)            # x, y, half-width of the detected box
+    for i, name in enumerate(tqdm(names, desc='  locating mosaic', leave=False)):
+        frame = impro.imread(os.path.join(mosaic_dir, name))
+        mask, x, y, size = runmodel.get_mosaic_position(frame, netM, opt)
+        if mask is not None and size > min_size:
+            pos[i] = (x, y, size)
+    valid = pos[:, 2] > 0
+    if not valid.any():
+        return None
+    idx = np.arange(n)
+    prev_i = np.maximum.accumulate(np.where(valid, idx, -1))
+    next_i = np.minimum.accumulate(np.where(valid, idx, n)[::-1])[::-1]
+    for i in np.where(~valid)[0]:
+        cands = [j for j in (prev_i[i], next_i[i]) if 0 <= j < n]
+        pos[i] = pos[min(cands, key=lambda j: abs(j - i))]
+    win = getattr(opt, 'medfilt_num', 5)
+    win = win if win % 2 == 1 else win + 1
+    for c in range(3):
+        pos[:, c] = _edge_median(pos[:, c], win)
+
+    ex_mul = random.uniform(*ex_range)               # same margin range as the synthetic builder
+    sides, size_mismatch = [], False
+    for i, name in enumerate(names):
+        mosaic = impro.imread(os.path.join(mosaic_dir, name))
+        origin = impro.imread(os.path.join(origin_dir, name))
+        h, w = mosaic.shape[:2]
+        if origin.shape[:2] != (h, w):               # pair at different resolutions: align to the censored one
+            origin = cv2.resize(origin, (w, h), interpolation=cv2.INTER_AREA)
+            size_mismatch = True
+        half = max(8, min(int(pos[i, 2] * ex_mul), h // 2, w // 2))
+        cx = int(np.clip(pos[i, 0], half, w - half))
+        cy = int(np.clip(pos[i, 1], half, h - half))
+        box = (slice(cy - half, cy + half), slice(cx - half, cx + half))
+        interp = cv2.INTER_AREA if 2 * half > outsize else cv2.INTER_CUBIC
+        impro.imwrite(os.path.join(mosaic_dir, name), cv2.resize(mosaic[box], (outsize, outsize), interpolation=interp))
+        impro.imwrite(os.path.join(origin_dir, name), cv2.resize(origin[box], (outsize, outsize), interpolation=interp))
+        sides.append(2 * half)
+    # drop frames that couldn't be paired: leaving them would put uncropped full frames in the dataset
+    for d in (origin_dir, mosaic_dir):
+        for f in os.listdir(d):
+            if f.lower().endswith('.jpg') and f not in set(names):
+                os.remove(os.path.join(d, f))
+    return {'frames': n, 'median_side': int(np.median(sides)), 'ex_mul': ex_mul,
+            'enlarged_pct': 100.0 * float(np.mean(np.array(sides) < outsize)), 'resized_origin': size_mismatch}
 
 
 def extract_frames(videopath, out_dir, fps):
@@ -158,6 +241,11 @@ def main():
              'temporal model uses a frame-count stride, so mixed extraction rates across your '
              'combined dataset mean inconsistent real-world motion per training sample).')
     parser.add_argument('--n_samples', type=int, default=8)
+    parser.add_argument('--outsize', type=int, default=286,
+        help='frames are cropped to the mosaic region and resized to this size (px). Use the same value as '
+             'make_datasets/make_video_dataset.py --outsize; 286 for the default 256px training, 572 for 512px.')
+    parser.add_argument('--no_crop', action='store_true',
+        help='keep full frames instead of cropping to the mosaic region (not recommended, see crop_pair_to_mosaic)')
     parser.add_argument('--reuse_uncensored_for_synthetic', choices=['ask', 'yes', 'no'], default='ask',
         help='Also copy each pair\'s uncensored clip into --synthetic_source_dir, so it can be '
              'reused as raw material for synthetic mosaic generation at OTHER bucket sizes (via '
@@ -233,6 +321,18 @@ def main():
             print(f"  ** WARNING: frame count mismatch (origin={n_orig}, mosaic={n_mosaic}) — "
                   f"the two source videos may differ in length/framerate. This pair's alignment "
                   f"is suspect; recommend checking manually before training on it. **")
+
+        if not known.no_crop:
+            stats = crop_pair_to_mosaic(netM, opt, origin_dir, mosaic_dir, known.outsize)
+            if stats is None:
+                print("  could not locate the mosaic in this pair's frames -- skipping it")
+                shutil.rmtree(bucket_dir, ignore_errors=True)
+                continue
+            print(f"  cropped {stats['frames']} frame pairs to the mosaic region: median source crop "
+                  f"{stats['median_side']}px -> {known.outsize}px ({stats['enlarged_pct']:.0f}% enlarged)")
+            if stats['resized_origin']:
+                print("  note: the uncensored video has a different resolution than the censored one; "
+                      "it was resized to match before cropping.")
 
         results.append((name, result['pct'], bucket))
 

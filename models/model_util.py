@@ -47,6 +47,38 @@ def setup_device(opt):
     print("No CUDA or DirectML device available, using CPU (training will be very slow)")
     return torch.device('cpu'), 'cpu'
 
+def checkpoint_info_path(model_path):
+    return os.path.splitext(model_path)[0] + '.json'
+
+def checkpoint_input_size(model_path):
+    """Input size (px) a checkpoint was trained at, from the model_info.json that
+    train.py writes next to it; None if there's no usable file. The size can't be
+    read from the .pth itself: the network is fully convolutional, so weights
+    are identical in shape at any size."""
+    import json
+    try:
+        with open(checkpoint_info_path(model_path)) as f:
+            size = int(json.load(f)['finesize'])
+        return size if size > 0 else None
+    except Exception:
+        return None
+
+def resolve_model_input_size(opt):
+    """Set opt.input_size, the size the video model runs at: explicit
+    --infer_size, else the checkpoint's recorded size, else 256. A model
+    trained at one size and run at another still produces output, just a
+    worse one (mosaic blocks look a different size than it learned), so a
+    non-default size is always reported."""
+    explicit = int(getattr(opt, 'infer_size', 0) or 0)
+    recorded = checkpoint_input_size(opt.model_path) if getattr(opt, 'model_path', None) else None
+    opt.input_size = explicit or recorded or 256
+    if explicit and recorded and explicit != recorded:
+        print(f"[model] WARNING: --infer_size {explicit} differs from the {recorded}px this model was trained at")
+    if opt.input_size != 256 or recorded:
+        src = 'from --infer_size' if explicit else 'from model_info.json'
+        print(f"[model] Input size: {opt.input_size}px ({src})", flush=True)
+    return opt.input_size
+
 def resolve_inference_device(opt):
     """Decide the inference device ONCE (call right after option parsing) and
     record it on opt: opt.device_type ('cuda' | 'directml' | 'cpu'),
@@ -61,11 +93,20 @@ def resolve_inference_device(opt):
     requested = str(getattr(opt, 'requested_gpu_id', opt.gpu_id))
     opt.device_type, opt.infer_device = 'cpu', torch.device('cpu')
     detail = 'requested with --gpu_id -1' if requested == '-1' else 'no CUDA or DirectML device available'
+    explained = False   # set when a CUDA self-test failure has already been explained above
     if requested != '-1':
         if opt.gpu_id != '-1' and torch.cuda.is_available():
             # CUDA_VISIBLE_DEVICES already narrowed to the chosen card(s)
-            opt.device_type, opt.infer_device = 'cuda', torch.device('cuda')
-            detail = f"{torch.cuda.get_device_name(0)} (gpu_id {requested})"
+            ok, err = cuda_self_test()
+            if ok:
+                opt.device_type, opt.infer_device = 'cuda', torch.device('cuda')
+                detail = f"{torch.cuda.get_device_name(0)} (gpu_id {requested})"
+            else:
+                for line in _cuda_failure_report(err):
+                    print(f"[device] {line}", flush=True)
+                opt.gpu_id = '-1'          # everything downstream must now stay off CUDA
+                detail = f"CUDA failed its self-test ({err[:80]}); see the messages above"
+                explained = True
         elif DIRECTML_AVAILABLE:
             try:
                 count = torch_directml.device_count()
@@ -77,11 +118,66 @@ def resolve_inference_device(opt):
                 detail = f"{torch_directml.device_name(idx)} (device {idx} of {count})"
             except Exception as e:
                 detail = f"DirectML failed to initialise ({e})"
-    if opt.device_type == 'cpu' and requested != '-1':
+    if opt.device_type == 'cpu' and requested != '-1' and not explained:
         detail += _cpu_fallback_reason()
     opt.device_label = {'cuda': 'CUDA', 'directml': 'DirectML', 'cpu': 'CPU'}[opt.device_type]
     print(f"[device] Inference: {opt.device_label} | {detail}", flush=True)
     return opt.infer_device
+
+def cuda_self_test():
+    """Run the kinds of GPU operations the models use (padding, convolution, bilinear
+    upsampling, matrix multiply) and wait for them to finish. Returns (ok, error text).
+
+    torch.cuda.is_available() only says the CUDA library loaded and a GPU exists. A
+    PyTorch build that has no kernels for this GPU's architecture (e.g. RTX 50-series
+    "sm_120" with PyTorch older than 2.7 / CUDA older than 12.8) still reports True and then
+    fails on its first real kernel -- partway into a run, with a cryptic message.
+    Testing up front turns that into a clear explanation."""
+    try:
+        x = torch.randn(1, 3, 32, 32, device='cuda')
+        w = torch.randn(8, 3, 3, 3, device='cuda')
+        y = torch.nn.functional.conv2d(torch.nn.functional.pad(x, (1, 1, 1, 1), mode='reflect'), w)
+        y = torch.nn.functional.interpolate(y, scale_factor=2, mode='bilinear', align_corners=False)
+        total = (y.flatten(1) @ y.flatten(1).t()).sum()
+        torch.cuda.synchronize()
+        float(total)
+        return True, ''
+    except Exception as e:
+        lines = str(e).strip().splitlines()
+        return False, (lines[0] if lines else type(e).__name__)[:220]
+
+def _cuda_failure_report(err):
+    """Plain-language explanation of a failed cuda_self_test(), as log lines."""
+    try:
+        name = torch.cuda.get_device_name(0)
+        major, minor = torch.cuda.get_device_capability(0)
+    except Exception:
+        name, major, minor = 'the GPU', 0, 0
+    arch = f"sm_{major}{minor}"
+    try:
+        built_for = ", ".join(torch.cuda.get_arch_list()) or "unknown"
+    except Exception:
+        built_for = "unknown"
+    lines = [f"CUDA self-test FAILED: {err}",
+             f"  GPU: {name} (compute capability {major}.{minor} = {arch})",
+             f"  This PyTorch ({torch.__version__}, built for CUDA {torch.version.cuda}) has kernels for: {built_for}"]
+    low = err.lower()
+    cuda_ver = tuple(int(v) for v in (torch.version.cuda or '0.0').split('.')[:2])
+    if 'driver' in low and ('insufficient' in low or 'too old' in low or 'older' in low):
+        lines.append("  -> The NVIDIA driver is older than this PyTorch's CUDA needs. Update the NVIDIA driver "
+                     "(CUDA 13 builds need driver 580 or newer; CUDA 12.8 builds need 570 or newer).")
+    elif major >= 12 and cuda_ver < (12, 8):
+        lines.append("  -> RTX 50-series (Blackwell) GPUs need PyTorch 2.7 or newer built for CUDA 12.8 or newer. "
+                     "Reinstall PyTorch (python install_script.py, ideally in a fresh virtual environment).")
+    elif major > 0 and (major, minor) < (7, 5) and cuda_ver >= (13, 0):
+        lines.append("  -> CUDA 13 builds of PyTorch dropped GPUs older than the GTX 16 / RTX 20 series. "
+                     "Install a CUDA 12.x build instead: pip install torch torchvision "
+                     "--index-url https://download.pytorch.org/whl/cu126")
+    else:
+        lines.append("  -> This PyTorch build has no working kernels for this GPU. Reinstall PyTorch with a CUDA "
+                     "build that supports it (python install_script.py), or run python tools/check_gpu.py for a full diagnosis.")
+    lines.append("  Falling back to the CPU for this run.")
+    return lines
 
 def _cpu_fallback_reason():
     """Explain an unrequested CPU fallback. The usual cause is the Python

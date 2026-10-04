@@ -45,8 +45,8 @@ opt.parser.add_argument('--M',type=int,default=100, help='How many frames read f
 opt.parser.add_argument('--lr',type=float,default=0.0002, help='')
 opt.parser.add_argument('--beta1',type=float,default=0.9, help='')
 opt.parser.add_argument('--beta2',type=float,default=0.999, help='')
-opt.parser.add_argument('--finesize',type=int,default=256, help='')
-opt.parser.add_argument('--loadsize',type=int,default=286, help='')
+opt.parser.add_argument('--finesize',type=int,default=256, help='size (px) of the square crops the network trains on, and the size it runs at later. Larger = finer detail but memory grows with its SQUARE (512 uses ~4x the memory per sample of 256 -- lower --batchsize accordingly). The dataset must have been built with a matching --outsize (see make_datasets/make_video_dataset.py and tools/bucket_real_pairs.py)')
+opt.parser.add_argument('--loadsize',type=int,default=0, help='size frames are resized to before the random crop. 0 = automatic: finesize x 1.117 (286 for the default 256)')
 opt.parser.add_argument('--batchsize',type=int,default=1, help='')
 opt.parser.add_argument('--no_gan', action='store_true', help='if specified, do not use gan')
 opt.parser.add_argument('--n_blocks',type=int,default=4, help='')
@@ -119,6 +119,12 @@ if __name__ == '__main__':
     # this if the guard is missing.
     opt = opt.getparse()
     opt.T = 2*opt.N+1
+    if opt.loadsize <= 0:
+        opt.loadsize = int(round(opt.finesize * 286 / 256))   # keeps the original 256 -> 286 ratio
+    if opt.loadsize < opt.finesize:
+        sys.exit(f"--loadsize ({opt.loadsize}) must be at least --finesize ({opt.finesize})")
+    if opt.finesize != 256:
+        print(f"Training at {opt.finesize}px (loadsize {opt.loadsize}). Expect about {(opt.finesize/256)**2:.1f}x the memory per sample of the default 256px.")
     if opt.showresult_num >opt.batchsize:
         opt.showresult_num = opt.batchsize
     dir_checkpoint = os.path.join('checkpoints',opt.savename)
@@ -134,6 +140,16 @@ if __name__ == '__main__':
     '''
     if opt.gpu_id != '-1' and len(opt.gpu_id) == 1:
         torch.backends.cudnn.benchmark = True
+
+    def save_generator(path):
+        model_util.save(netG, path, opt.gpu_id, device=_device_for_calls)
+        # The network is fully convolutional: the .pth doesn't say what size it was trained at,
+        # and running it at another size gives quietly worse results. Record it beside the file;
+        # inference reads it (copy this .json along with the .pth).
+        import json
+        with open(os.path.splitext(path)[0] + '.json', 'w') as f:
+            json.dump({'finesize': opt.finesize, 'loadsize': opt.loadsize, 'N': opt.N, 'S': opt.S,
+                       'n_blocks': opt.n_blocks, 'model': 'BVDNet'}, f, indent=2)
 
     # device is None for CUDA (existing gpu_id-string based path, untouched) or
     # CPU; only set for DirectML, so this is purely additive — CUDA training
@@ -171,6 +187,21 @@ if __name__ == '__main__':
             if os.path.isdir(frame_dir) and len(os.listdir(frame_dir))>=opt.M:
                 videolist.append(video)
     sorted(videolist)
+    # Frames are resized so their short side is --loadsize. If the dataset was built with a
+    # smaller --outsize, every frame is ENLARGED: slower and more memory, but no extra detail.
+    _sides = []
+    for _v in videolist[:8]:
+        _d = os.path.join(opt.dataset, _v, 'origin_image')
+        _f = sorted(os.listdir(_d))[:1] if os.path.isdir(_d) else []
+        _img = impro.imread(os.path.join(_d, _f[0])) if _f else None
+        if _img is not None:
+            _sides.append(min(_img.shape[:2]))
+    if _sides:
+        _med = int(np.median(_sides))
+        if _med < 0.85 * opt.loadsize:
+            print(f"** WARNING: the dataset frames are about {_med}px, but training resizes them to {opt.loadsize}px, so they "
+                  f"are enlarged {opt.loadsize/_med:.1f}x -- no extra detail, just more memory and time. Rebuild the dataset "
+                  f"with --outsize {opt.loadsize} (or train at --finesize {int(round(_med * 256 / 286))}). **")
     videolist_train = videolist[:int(len(videolist)*0.8)].copy()
     videolist_eval = videolist[int(len(videolist)*0.8):].copy()
 
@@ -239,7 +270,7 @@ if __name__ == '__main__':
 
         # save network
         if train_iter%opt.save_freq == 0 and train_iter != 0:
-            model_util.save(netG, os.path.join('checkpoints',opt.savename,str(train_iter)+'_G.pth'), opt.gpu_id, device=_device_for_calls)
+            save_generator(os.path.join('checkpoints',opt.savename,str(train_iter)+'_G.pth'))
             if not opt.no_gan:
                 model_util.save(netD, os.path.join('checkpoints',opt.savename,str(train_iter)+'_D.pth'), opt.gpu_id, device=_device_for_calls)
 
@@ -324,6 +355,8 @@ if __name__ == '__main__':
               f"video folders for this bucket before re-running. **")
     elif final_iter % opt.save_freq != 0:
         print(f"Saving final checkpoint at iter {final_iter}...")
-        model_util.save(netG, os.path.join('checkpoints',opt.savename,str(final_iter)+'_G.pth'), opt.gpu_id, device=_device_for_calls)
+        save_generator(os.path.join('checkpoints',opt.savename,str(final_iter)+'_G.pth'))
+        print(f"Saved {final_iter}_G.pth (+ {final_iter}_G.json recording the {opt.finesize}px training size -- "
+              f"copy the .json along with the .pth when you move or rename the checkpoint).")
         if not opt.no_gan:
             model_util.save(netD, os.path.join('checkpoints',opt.savename,str(final_iter)+'_D.pth'), opt.gpu_id, device=_device_for_calls)

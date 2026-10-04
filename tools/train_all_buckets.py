@@ -207,7 +207,9 @@ def main():
 
     print("\nDone. Trained checkpoints are under checkpoints/<savename>/ as usual for train/clean/train.py — "
           "pick the checkpoint you want per bucket and copy/rename it into your --model_manifest's expected "
-          "path (e.g. pretrained_models/mosaic/clean_1pct.pth).")
+          "path (e.g. pretrained_models/mosaic/clean_1pct.pth). Copy the matching .json too "
+          "(5000_G.json -> clean_1pct.json): it records the size the model was trained at, which inference reads "
+          "so it runs the model at that size. Without it, inference assumes 256px.")
 
 
 if __name__ == '__main__':

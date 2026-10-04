@@ -16,10 +16,10 @@ from .init import video_init
 def addmosaic_img(opt,netS):
     path = opt.media_path
     print('Add Mosaic:',path)
-    img = impro.imread(path)
+    img, img_alpha = impro.imread_with_alpha(path)
     mask = runmodel.get_ROI_position(img,netS,opt)[0]
     img = mosaic.addmosaic(img,mask,opt)
-    impro.imwrite(os.path.join(opt.result_dir,os.path.splitext(os.path.basename(path))[0]+'_add.jpg'),img)
+    impro.save_result_image(opt, path, 'add', img, img_alpha)
 
 def get_roi_positions(opt,netS,imagepaths,savemask=True):
     # resume

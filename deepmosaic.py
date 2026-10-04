@@ -27,6 +27,7 @@ def _startup():
     opt = Options().getparse(test_flag = True)
     from models import model_util
     model_util.resolve_inference_device(opt)
+    model_util.resolve_model_input_size(opt)
 
     # Fail fast with a clear, actionable message if ffmpeg/ffprobe are missing,
     # rather than loading models (slow, and on GPU it reserves memory) only to
@@ -162,7 +163,7 @@ if __name__ == '__main__':
     except Exception as ex:
         print('--------------------ERROR--------------------')
         print('--------------Environment--------------')
-        print('DeepMosaicsPlus: 1.2.0 (fork of DeepMosaics 0.5.1)')
+        print('DeepMosaicsPlus: 1.2.1 (fork of DeepMosaics 0.5.1)')
         print('Python:',sys.version)
         import torch
         print('Pytorch:',torch.__version__)
