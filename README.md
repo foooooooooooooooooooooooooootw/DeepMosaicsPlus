@@ -247,7 +247,8 @@ Want to train on custom datasets? Check out the [training guide](./docs/training
 - [x] Add additional image demosaic final file extensions (not just jpg)
 - [ ] Explore more operations that can be moved to GPU to reduce CPU work
 - [ ] Make multiple models specifically meant for anime/real life + different pixel sizes
-
+- [ ] Add ROCm support as an alternative to directml
+- [ ] Re-integrate linux support
 ---
 
 ## 🙏 Acknowledgements
