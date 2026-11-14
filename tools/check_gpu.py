@@ -87,7 +87,7 @@ def gather_torch():
     except Exception as e:
         t["import_error"] = f"{type(e).__name__}: {e}"
         return t
-    t.update(version=torch.__version__, cuda_build=torch.version.cuda, available=False,
+    t.update(version=torch.__version__, cuda_build=torch.version.cuda, hip=getattr(torch.version, "hip", None), available=False,
              arch_list=[], device=None, cc=None, ops={}, tv_version=None, tv_error=None)
     try:
         import torchvision
@@ -154,6 +154,20 @@ def diagnose(pk, smi, t):
                          "Fix: python install_script.py (it reinstalls both)."))
     cuda_build = parse_ver(t.get("cuda_build") or "")
     gpus = (smi or {}).get("gpus", [])
+    if t.get("hip"):
+        # AMD ROCm build: same torch.cuda API, but none of the NVIDIA checks below apply
+        failed = {k: v for k, v in t.get("ops", {}).items() if v}
+        if not t.get("available"):
+            problems.append((f"This PyTorch ({t['version']}) is an AMD ROCm {t['hip']} build, but it can't see a supported GPU.",
+                             "ROCm on Windows needs Windows 11, a recent AMD driver and a supported Radeon card. Update the driver, "
+                             "or run python install_script.py and choose DirectML (works on any DirectX 12 GPU)."))
+        elif failed:
+            first = next(iter(failed.items()))
+            problems.append((f"A real GPU operation failed on ROCm ({first[0]}): {first[1]}",
+                             "Update the AMD driver, or run python install_script.py and choose DirectML."))
+        else:
+            notes.append(f"PyTorch + ROCm {t['hip']} works on {t.get('device')}.")
+        return problems, notes
     if cuda_build is None:
         if gpus:
             problems.append((f"This PyTorch ({t['version']}) is a CPU-only build, but an NVIDIA GPU ({gpus[0]['name']}) is installed.",
@@ -209,7 +223,7 @@ def main():
     if t.get("import_error"):
         print(f"torch failed to import: {t['import_error']}")
     else:
-        print(f"torch {t['version']}  |  built for CUDA {t['cuda_build']}  |  torchvision {t.get('tv_version')}"
+        print(f"torch {t['version']}  |  built for {'ROCm ' + str(t['hip']) if t.get('hip') else 'CUDA ' + str(t['cuda_build'])}  |  torchvision {t.get('tv_version')}"
               f"{'  (BROKEN: ' + t['tv_error'] + ')' if t.get('tv_error') else ''}")
         print(f"GPU kernels in this build: {', '.join(t['arch_list']) or 'none (CPU-only build)'}")
         print(f"CUDA usable: {t['available']}" + (f"  |  {t['device']}  (compute capability {t['cc'][0]}.{t['cc'][1]})" if t.get('device') else ""))

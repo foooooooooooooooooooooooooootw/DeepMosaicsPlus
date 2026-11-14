@@ -116,7 +116,7 @@ class VideoLoader(object):
 
 class VideoDataLoader(object):
     """VideoDataLoader"""
-    def __init__(self, opt, videolist, test_flag=False):
+    def __init__(self, opt, videolist, test_flag=False, n_workers=None):
         super(VideoDataLoader, self).__init__()
         self.videolist = []
         self.opt = opt
@@ -136,8 +136,9 @@ class VideoDataLoader(object):
         # reaches the GPU, so VRAM usage staying flat while this happens is
         # expected, not a sign the GPU isn't being used correctly.
         n_unique_videos = max(1, len(videolist))
-        self.n_workers = max(1, min(self.opt.load_thread, n_unique_videos))
-        if self.n_workers < self.opt.load_thread:
+        requested = n_workers or self.opt.load_thread
+        self.n_workers = max(1, min(requested, n_unique_videos))
+        if n_workers is None and self.n_workers < self.opt.load_thread:
             print(f"Note: --load_thread {self.opt.load_thread} requested, but only "
                   f"{n_unique_videos} video folder(s) are available — using {self.n_workers} "
                   f"worker process(es) instead. Extra workers beyond the number of distinct "

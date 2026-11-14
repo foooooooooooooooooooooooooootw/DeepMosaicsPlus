@@ -11,7 +11,7 @@ class Options():
     def initialize(self):
 
         #base
-        self.parser.add_argument('--version', action='version', version='DeepMosaicsPlus 1.2.1 (fork of DeepMosaics 0.5.1)')
+        self.parser.add_argument('--version', action='version', version='DeepMosaicsPlus 1.3.0 (fork of DeepMosaics 0.5.1)')
         self.parser.add_argument('--debug', action='store_true', help='if specified, start debug mode')
         self.parser.add_argument('--gpu_id', type=str,default='0', help='if -1, use cpu')
         self.parser.add_argument('--media_path', type=str, default='./imgs/ruoruo.jpg',help='your videos or images path')
@@ -40,7 +40,9 @@ class Options():
         self.parser.add_argument('--tr_blur', type=int, default=10, help='ksize of blur when using traditional method, it will affect final quality')
         self.parser.add_argument('--tr_down', type=int, default=10, help='downsample when using traditional method,it will affect final quality')
         self.parser.add_argument('--no_feather', action='store_true', help='if specified, no edge feather and color correction, but run faster')
-        self.parser.add_argument('--infer_size', type=int, default=0, help='input size the video clean model runs at (px). 0 = automatic: the size recorded next to the checkpoint by train.py (model_info.json), else 256. Set it when a model was trained at a non-default --finesize and its model_info.json is missing')
+        self.parser.add_argument('--gpu_preprocess', type=str, default='auto', choices=['auto', 'on', 'off'], help='where the video model\'s input is resized and normalised. auto = on the GPU with CUDA/ROCm, with OpenCV on the CPU otherwise (DirectML always uses the CPU path). off = always OpenCV')
+        self.parser.add_argument('--fp16', action='store_true', help='EXPERIMENTAL: run the video clean model in half precision on CUDA/ROCm (faster and about half the memory on most GPUs; output can differ very slightly). Falls back to full precision by itself if the GPU rejects it')
+        self.parser.add_argument('--infer_size', type=int, default=0, help='input size the video clean model runs at (px). 0 = automatic: the size recorded next to the checkpoint by train.py (model_info.json), else 512. Set it when a model was trained at a non-default --finesize and its model_info.json is missing')
         self.parser.add_argument('--img_format', type=str, default='same', choices=['same', 'jpg', 'png', 'webp', 'bmp', 'tiff'], help='file format of IMAGE results. same = same format as the input image (png -> png, jpg -> jpg ...). PNG, WebP and TIFF keep transparency; JPG and BMP cannot, so transparent areas are filled with --img_background')
         self.parser.add_argument('--img_quality', type=int, default=95, help='JPG / lossy WebP quality, 1-100 (higher = better and larger)')
         self.parser.add_argument('--png_compression', type=int, default=3, help='PNG compression level 0-9. Lossless at every level; higher = smaller file, slower to save')

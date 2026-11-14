@@ -241,9 +241,9 @@ def main():
              'temporal model uses a frame-count stride, so mixed extraction rates across your '
              'combined dataset mean inconsistent real-world motion per training sample).')
     parser.add_argument('--n_samples', type=int, default=8)
-    parser.add_argument('--outsize', type=int, default=286,
+    parser.add_argument('--outsize', type=int, default=572,
         help='frames are cropped to the mosaic region and resized to this size (px). Use the same value as '
-             'make_datasets/make_video_dataset.py --outsize; 286 for the default 256px training, 572 for 512px.')
+             'make_datasets/make_video_dataset.py --outsize; 572 for the default 512px training, 286 for 256px.')
     parser.add_argument('--no_crop', action='store_true',
         help='keep full frames instead of cropping to the mosaic region (not recommended, see crop_pair_to_mosaic)')
     parser.add_argument('--reuse_uncensored_for_synthetic', choices=['ask', 'yes', 'no'], default='ask',

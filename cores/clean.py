@@ -85,7 +85,7 @@ def _adopt_checkpoint_size(opt, model_path):
     was given explicitly)."""
     from models import model_util
     size = model_util.checkpoint_input_size(model_path)
-    if size and not int(getattr(opt, 'infer_size', 0) or 0) and size != getattr(opt, 'input_size', 256):
+    if size and not int(getattr(opt, 'infer_size', 0) or 0) and size != getattr(opt, 'input_size', 512):
         print(f"[auto_model] {os.path.basename(model_path)} was trained at {size}px -> running it at {size}px")
         opt.input_size = size
 
@@ -231,6 +231,10 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
 
     loader_thread = Thread(target=_image_loader, daemon=True)
     loader_thread.start()
+    # mask clean-up (full-size resize, threshold, connected components) for a
+    # batch runs on these threads while the GPU is free for the next batch
+    post_pool = ThreadPoolExecutor(max_workers=max(1, min(os.cpu_count() or 4, batch_size)))
+    mask_savers = []
 
     while True:
         item = prefetch_q.get()
@@ -249,30 +253,29 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
         batch_positions = []
         batch_masks = []
         
-        for i, (img, path) in enumerate(zip(batch_images, batch_paths)):
-            if img is not None:
+        # One forward pass for the whole batch (was one GPU call per frame)
+        valid = [(i, img) for i, img in enumerate(batch_images) if img is not None]
+        found = {}
+        if valid:
+            try:
+                outs = runmodel.get_mosaic_positions_batch([img for _, img in valid], netM, opt, pool=post_pool)
+                found = {i: o for (i, _), o in zip(valid, outs)}
+                consecutive_errors = 0  # Reset on success
+            except Exception as e:
+                print(f"Error processing frames from {batch_paths[0]}: {e}")
+                consecutive_errors += len(valid)
+
+        for i, path in enumerate(batch_paths):
+            mask, x, y, size = found.get(i, (None, 0, 0, 0))
+            batch_positions.append([x, y, size])
+            if mask is not None:
+                batch_masks.append((mask, path))
+            if not opt.no_preview and isinstance(mask, np.ndarray) and mask.size > 0 and i % 2 == 0:
                 try:
-                    mask, x, y, size = runmodel.get_mosaic_position(img, netM, opt)  # Note: get_mosaic_position returns mask first
-                    batch_positions.append([x, y, size])
-                    if mask is not None:
-                        batch_masks.append((mask, path))
-                    consecutive_errors = 0  # Reset on success
-                    
-                    # Fixed preview code - check if mask exists and is valid
-                    if not opt.no_preview and mask is not None and isinstance(mask, np.ndarray) and mask.size > 0:
-                        if i % 2 == 0:  # Only show every other frame
-                            try:
-                                cv2.imshow('mosaic mask', mask)
-                                cv2.waitKey(1)
-                            except Exception as preview_error:
-                                print(f"Preview error for {path}: {preview_error}")
-                                
-                except Exception as e:
-                    print(f"Error processing image {path}: {e}")
-                    batch_positions.append([0, 0, 0])
-                    consecutive_errors += 1
-            else:
-                batch_positions.append([0, 0, 0])
+                    cv2.imshow('mosaic mask', mask)
+                    cv2.waitKey(1)
+                except Exception as preview_error:
+                    print(f"Preview error for {path}: {preview_error}")
         
         positions.extend(batch_positions)
         
@@ -285,7 +288,9 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
                     except Exception as e:
                         print(f"Error saving mask for {path}: {e}")
             
-            Thread(target=save_mask_batch, args=(batch_masks,)).start()
+            saver = Thread(target=save_mask_batch, args=(batch_masks,))
+            saver.start()
+            mask_savers = [t for t in mask_savers if t.is_alive()] + [saver]
         
         # Progress and checkpointing
         current_frame = batch_end + resume_frame
@@ -304,6 +309,9 @@ def get_mosaic_positions(opt, netM, imagepaths, savemask=True):
     
     if not opt.no_preview:
         cv2.destroyAllWindows()
+    post_pool.shutdown(wait=True)
+    for t in mask_savers:      # every mask must be on disk before the cleaning step reads it
+        t.join()
     
     print('\nOptimize mosaic locations...')
     positions = np.array(positions)
@@ -561,7 +569,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     N, T, S = 2, 5, 3
     LEFT_FRAME = (N * S)
     POOL_NUM = LEFT_FRAME * 2 + 1
-    INPUT_SIZE = int(getattr(opt, 'input_size', 256))   # see model_util.resolve_model_input_size
+    INPUT_SIZE = int(getattr(opt, 'input_size', 512))   # see model_util.resolve_model_input_size
     FRAME_POS = np.linspace(0, (T-1)*S, T, dtype=np.int64)
     
     # Pre-allocate arrays to avoid repeated memory allocation
@@ -576,7 +584,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     start_frame = int(imagepaths[0][7:13])
     positions = get_mosaic_positions(opt, netM, imagepaths, savemask=True)[(start_frame-1):]
     netG = select_netG_for_size_video(opt, netG, imagepaths, positions)
-    if int(getattr(opt, 'input_size', 256)) != INPUT_SIZE:
+    if int(getattr(opt, 'input_size', 512)) != INPUT_SIZE:
         # --auto_model picked a bucket model trained at a different size
         INPUT_SIZE = int(opt.input_size)
         input_stream_array = np.empty((1, T, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
@@ -638,10 +646,22 @@ def cleanmosaic_video_fusion(opt, netG, netM):
             except OSError:
                 pass  # File might already be removed
     
-    # Start writer thread
-    writer_thread = Thread(target=write_result)
-    writer_thread.daemon = True
-    writer_thread.start()
+    # Writer threads: paste-back (resize, feather, blend) and image encoding are
+    # the heaviest CPU work per frame, and OpenCV releases the GIL for them, so
+    # several writers run truly in parallel. Each frame goes to its own file, so
+    # the order they finish in doesn't matter.
+    n_writers = max(1, min(4, (os.cpu_count() or 2) // 2))
+    writer_threads = [Thread(target=write_result, daemon=True) for _ in range(n_writers)]
+    for t in writer_threads:
+        t.start()
+
+    # cuDNN picks its fastest convolution algorithm for the (fixed) input size.
+    # Not on ROCm, where the equivalent (MIOpen) search is slow on first use.
+    from models import model_util
+    if getattr(opt, 'device_type', None) == 'cuda' and not model_util.is_rocm():
+        torch.backends.cudnn.benchmark = True
+    gpu_pre_mode = getattr(opt, 'gpu_preprocess', 'auto')
+    timing = {'read': 0.0, 'prepare': 0.0, 'model': 0.0, 'queue': 0.0}
     
     # Pre-calculate clipped indices to avoid repeated calculations
     pool_indices = []
@@ -654,6 +674,41 @@ def cleanmosaic_video_fusion(opt, netG, netM):
             indices.append(np.clip(i + LEFT_FRAME, 0, length - 1))
         pool_indices.append(indices)
     
+    # Frame reader thread: decodes frames ahead of the main loop, in exactly the
+    # order the loop consumes them, so decoding overlaps with the model instead
+    # of the GPU idling while the next frame is read.
+    load_order = [idx for indices in pool_indices for idx in indices]
+    frame_q = Queue(12)
+
+    def read_frames():
+        last_idx, last_img = -1, None
+        for idx in load_order:
+            if idx != last_idx:      # the last frame repeats at the end of the clip
+                try:
+                    last_img = impro.imread(os.path.join(video2image_dir, imagepaths[idx]))
+                except Exception as e:
+                    last_img = e
+                last_idx = idx
+            frame_q.put(last_img)
+
+    Thread(target=read_frames, daemon=True).start()
+
+    def next_frame():
+        t0 = time.time()
+        img = frame_q.get()
+        timing['read'] += time.time() - t0
+        if isinstance(img, Exception):
+            raise img
+        return img
+
+    def run_model(net, stream, prev, dev, half):
+        with data.inference_context(dev):
+            if half:
+                with torch.autocast('cuda', dtype=torch.float16):
+                    out = net(stream, prev)
+                return out.float()
+            return net(stream, prev)
+
     # Main processing loop
     for i, imagepath in enumerate(imagepaths):
         x, y, size = positions[i][0], positions[i][1], positions[i][2]
@@ -662,14 +717,12 @@ def cleanmosaic_video_fusion(opt, netG, netM):
         if i == 0:  # init
             img_pool.clear()  # Ensure clean start
             for idx in pool_indices[i]:
-                img_path = os.path.join(video2image_dir, imagepaths[idx])
-                img_pool.append(impro.imread(img_path))
+                img_pool.append(next_frame())
         else:  # load next frame
             if len(img_pool) >= POOL_NUM:
                 img_pool.pop(0)  # Remove oldest frame
             if pool_indices[i]:  # Only load if we have new index
-                img_path = os.path.join(video2image_dir, imagepaths[pool_indices[i][0]])
-                img_pool.append(impro.imread(img_path))
+                img_pool.append(next_frame())
         
         img_origin = img_pool[LEFT_FRAME]
         
@@ -688,52 +741,76 @@ def cleanmosaic_video_fusion(opt, netG, netM):
                 y_start, y_end = max(0, y - size), min(img_origin.shape[0], y + size)
                 x_start, x_end = max(0, x - size), min(img_origin.shape[1], x + size)
                 
-                # Build input stream more efficiently
-                for idx, pos in enumerate(FRAME_POS):
-                    if pos < len(img_pool):
-                        crop = img_pool[pos][y_start:y_end, x_start:x_end]
-                        # Resize directly into pre-allocated array slice
-                        resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
-                        input_stream_array[0, idx] = resized[:, :, ::-1]  # BGR to RGB
-                
+                t_prep = time.time()
                 g_dev = next(netG.parameters()).device
-                if init_flag:
-                    init_flag = False
-                    # Convert middle frame for previous_frame
-                    previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id)
-                
-                # Transpose in-place and convert to tensor
-                input_tensor = data.to_tensor(
-                    data.normalize(input_stream_array.transpose((0, 4, 1, 2, 3))), 
-                    gpu_id=opt.gpu_id
-                )
-                # Inputs must live on the model's device (DirectML models get
-                # CPU-built tensors otherwise).
-                # The 5-D stream stays on the CPU for DirectML: the converted model
-                # splits it into 4-D frames itself (DirectML can't hold/convolve 5-D).
-                if not data.is_directml(g_dev):
-                    input_tensor = input_tensor.to(g_dev)
+                # Resize + normalise on the GPU (CUDA/ROCm by default) or with cv2 on the CPU
+                gpu_pre = gpu_pre_mode == 'on' or (gpu_pre_mode == 'auto' and g_dev.type == 'cuda')
+                if gpu_pre and not data.is_directml(g_dev):
+                    crops = [img_pool[pos][y_start:y_end, x_start:x_end] for pos in FRAME_POS]
+                    input_tensor = data.crops_to_stream(crops, INPUT_SIZE, g_dev)
+                    if init_flag:
+                        init_flag = False
+                        previous_frame = input_tensor[:, :, N].clone()
+                else:
+                    # Build input stream more efficiently
+                    for idx, pos in enumerate(FRAME_POS):
+                        if pos < len(img_pool):
+                            crop = img_pool[pos][y_start:y_end, x_start:x_end]
+                            # Resize directly into pre-allocated array slice
+                            resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
+                            input_stream_array[0, idx] = resized[:, :, ::-1]  # BGR to RGB
+
+                    if init_flag:
+                        init_flag = False
+                        # Convert middle frame for previous_frame
+                        previous_frame = data.im2tensor(input_stream_array[0, N], bgr2rgb=False, gpu_id=opt.gpu_id)
+
+                    # Transpose in-place and convert to tensor
+                    input_tensor = data.to_tensor(
+                        data.normalize(input_stream_array.transpose((0, 4, 1, 2, 3))),
+                        gpu_id=opt.gpu_id
+                    )
+                    # Inputs must live on the model's device (DirectML models get
+                    # CPU-built tensors otherwise).
+                    # The 5-D stream stays on the CPU for DirectML: the converted model
+                    # splits it into 4-D frames itself (DirectML can't hold/convolve 5-D).
+                    if not data.is_directml(g_dev):
+                        input_tensor = input_tensor.to(g_dev)
                 previous_frame = previous_frame.contiguous().to(g_dev)
+                t_model = time.time()
+                timing['prepare'] += t_model - t_prep
                 
                 # Model inference with minimal overhead
+                half = bool(getattr(opt, 'fp16', False)) and g_dev.type == 'cuda'
                 try:
-                    with data.inference_context(g_dev):
-                        unmosaic_pred = netG(input_tensor, previous_frame)
+                    unmosaic_pred = run_model(netG, input_tensor, previous_frame, g_dev, half)
                 except RuntimeError as e:
-                    if g_dev.type == 'cpu':
+                    if half:
+                        print(f"\n[device] Half precision failed ({str(e).splitlines()[0][:120]}); continuing in full precision")
+                        opt.fp16 = False
+                        unmosaic_pred = run_model(netG, input_tensor, previous_frame, g_dev, False)
+                    elif g_dev.type == 'cpu':
                         raise
-                    # e.g. an operator DirectML doesn't support: finish on CPU
-                    print(f"\n[device] Model failed on {g_dev} ({e}); continuing on CPU")
-                    netG = netG.cpu()
-                    input_tensor, previous_frame = input_tensor.cpu(), previous_frame.cpu()
-                    with torch.inference_mode():
-                        unmosaic_pred = netG(input_tensor, previous_frame)
+                    else:
+                        # e.g. an operator DirectML doesn't support: finish on CPU
+                        print(f"\n[device] Model failed on {g_dev} ({e}); continuing on CPU")
+                        netG = netG.cpu()
+                        input_tensor, previous_frame = input_tensor.cpu(), previous_frame.cpu()
+                        with torch.inference_mode():
+                            unmosaic_pred = netG(input_tensor, previous_frame)
                 
-                img_fake = data.tensor2im(unmosaic_pred, rgb2bgr=True)
+                # (the copy back from the GPU waits for the model, so its time counts as 'model')
+                if data.is_directml(unmosaic_pred.device):
+                    img_fake = data.tensor2im(unmosaic_pred, rgb2bgr=True)
+                else:
+                    img_fake = data.tensor2im_fast(unmosaic_pred)
                 previous_frame = unmosaic_pred
+                t_queue = time.time()
+                timing['model'] += t_queue - t_model
                 
                 # Queue result for writing
                 write_pool.put([False, imagepath, img_origin.copy(), img_fake, x, y, size])
+                timing['queue'] += time.time() - t_queue
                 
             except Exception as e:
                 print(f'\nError processing frame {i}: {e}')
@@ -750,9 +827,16 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     
     print()  # New line after progress
     
-    # Clean shutdown
-    write_pool.put(None)  # Sentinel to stop writer thread
-    writer_thread.join(timeout=30)  # Wait for writer to finish
+    # Clean shutdown: one stop marker per writer, then wait for ALL frames to be
+    # on disk (the old 30 s limit could start the encode with frames missing)
+    for _ in writer_threads:
+        write_pool.put(None)
+    for t in writer_threads:
+        t.join()
+    total = max(time.time() - t1, 1e-6)
+    print(f"[timing] Cleaning {length} frames took {total:.1f}s ({length/total:.1f} fps). Main loop waited on: "
+          f"frame decode {timing['read']:.1f}s, input preparation {timing['prepare']:.1f}s, "
+          f"model {timing['model']:.1f}s, paste-back/encode queue {timing['queue']:.1f}s", flush=True)
     
     if not opt.no_preview:
         cv2.destroyAllWindows()

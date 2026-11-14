@@ -48,6 +48,30 @@ def tensor2im(image_tensor, gray=False, rgb2bgr = True ,is0_1 = False, batch_ind
         image_numpy = image_numpy[...,::-1]-np.zeros_like(image_numpy)
     return image_numpy.astype(np.uint8)
 
+def tensor2im_fast(image_tensor, batch_index=0):
+    """Same result as tensor2im(t, rgb2bgr=True) for a 3-channel -1..1 image, but the
+    scaling, clipping, 8-bit conversion and RGB->BGR flip run on the tensor's own
+    device, so a GPU sends back 1 byte per value instead of a 4-byte float and the
+    CPU does none of the arithmetic. Not for DirectML (kept on the proven path)."""
+    t = image_tensor.detach()[batch_index].float()
+    t = ((t + 1) / 2.0 * 255.0).clamp_(0, 255).to(torch.uint8)      # truncates, like astype(uint8)
+    return np.ascontiguousarray(t.flip(0).permute(1, 2, 0).cpu().numpy())
+
+def crops_to_stream(crops, size, device):
+    """GPU version of the video model's input preparation. crops: T same-shaped
+    BGR uint8 arrays (H, W, 3). Returns the (1, 3, T, size, size) RGB float
+    tensor in -1..1 on `device`. The raw crops are uploaded as bytes and the
+    bicubic resize, colour flip and normalisation run on the GPU instead of
+    cv2 on the CPU. Same bicubic kernel as cv2.INTER_CUBIC (a = -0.75); results
+    differ only by cv2's rounding to whole 8-bit values (under 1/255)."""
+    batch = torch.from_numpy(np.ascontiguousarray(np.stack(crops))).to(device, non_blocking=True)
+    batch = batch.permute(0, 3, 1, 2).float()                        # T,3,H,W (BGR)
+    if batch.shape[2] != size or batch.shape[3] != size:
+        batch = torch.nn.functional.interpolate(batch, size=(size, size), mode='bicubic', align_corners=False)
+        batch = batch.clamp_(0, 255)
+    batch = (batch.flip(1) / 255.0 - 0.5) / 0.5                      # BGR -> RGB, -1..1
+    return batch.permute(1, 0, 2, 3).unsqueeze(0).contiguous()       # 1,3,T,H,W
+
 def is_directml(device):
     """True for a torch-directml device. Its name is 'privateuseone:N', so the
     old checks ('directml' in str(device)) never matched and the DirectML-

@@ -35,6 +35,26 @@ CUDA_BUILDS = ["cu132", "cu130", "cu128", "cu126", "cu124", "cu121", "cu118"]
 TORCH_INDEX = "https://download.pytorch.org/whl/"
 DIRECTML_PYTHON = ((3, 8), (3, 12))     # torch-directml only publishes wheels for these
 
+# AMD's PyTorch-on-Windows build (ROCm). AMD publishes the wheels on repo.radeon.com, per release
+# and per Python version, so they are listed explicitly. Source of these names:
+# https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html
+# To move to a newer release, update this block from that page.
+ROCM_WINDOWS = {
+    "version": "7.2.1",
+    "python": (3, 12),                  # the wheels are cp312 only
+    "driver": "Adrenalin 26.2.2 or newer",
+    "base": "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/",
+    "sdk": ["rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
+            "rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
+            "rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
+            "rocm-7.2.1.tar.gz"],
+    "torch": ["torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+              "torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl"],
+    "listed_gpus": "RX 9070 / 9070 XT / 9060 XT, RX 7900 XTX, RX 7700, Radeon PRO W7900, AI PRO R9700",
+}
+ROCM_PACKAGES = ["rocm", "rocm-sdk-core", "rocm-sdk-devel", "rocm-sdk-libraries-custom"]
+BACKENDS = ("cuda", "rocm", "directml", "cpu")
+
 # Real GPU work, not just "is CUDA available": padding, convolution, bilinear upsampling and a matrix
 # multiply, the same operations the models use. A build that has no kernels for this GPU's architecture
 # (e.g. RTX 50-series with PyTorch older than 2.7) reports CUDA available and then fails here.
@@ -148,7 +168,14 @@ def detect_backend():
         print("  NVIDIA GPU detected -> CUDA\n")
         return "cuda"
     if os.name == "nt" and any(k in names for k in ("amd", "radeon", "intel")):
-        print("  AMD/Intel GPU detected -> DirectML\n")
+        print("  AMD/Intel GPU detected -> DirectML")
+        if any(k in names for k in ("amd", "radeon")):
+            print("  (AMD: you can type 'rocm' below to try AMD's PyTorch+ROCm build instead. It is usually")
+            print(f"   faster than DirectML and can also train, but needs Windows 11, Python "
+                  f"{ROCM_WINDOWS['python'][0]}.{ROCM_WINDOWS['python'][1]}, driver {ROCM_WINDOWS['driver']},")
+            print(f"   and a supported card. AMD lists: {ROCM_WINDOWS['listed_gpus']}.")
+            print("   The installer tests it on your GPU and goes back to DirectML if it does not work.)")
+        print()
         return "directml"
     print("  No supported GPU detected -> CPU\n")
     return "cpu"
@@ -157,16 +184,51 @@ def choose_backend():
     detected = detect_backend()
     if DRY_RUN:
         return detected
-    ans = input(f"Install for [{detected}]? Press Enter to accept, or type cuda / directml / cpu: ").strip().lower()
-    return ans if ans in ("cuda", "directml", "cpu") else detected
+    ans = input(f"Install for [{detected}]? Press Enter to accept, or type {' / '.join(BACKENDS)}: ").strip().lower()
+    return ans if ans in BACKENDS else detected
 
 # ------------------------------------------------------------
 
-def remove_existing_torch():
+def remove_existing_torch(keep_rocm_sdk=False):
     # Needed so re-running actually changes the build: pip otherwise treats an
     # existing CPU-only torch as "already satisfied" and skips the CUDA one.
     print("\nRemoving any existing PyTorch so the right build can be installed...")
     pip("uninstall", "-y", "torch", "torchvision", "torch-directml")
+    if not keep_rocm_sdk:
+        pip("uninstall", "-y", *ROCM_PACKAGES)      # several GB; only useful to the ROCm build
+
+def install_rocm():
+    """AMD's PyTorch+ROCm build for Windows. It uses the same torch.cuda API as NVIDIA builds, so the
+    same GPU smoke test verifies it. It cannot be installed together with torch-directml (each needs
+    its own torch), so a failure here falls back to DirectML."""
+    r = ROCM_WINDOWS
+    if os.name != "nt":
+        print("\nThis installer only automates ROCm on Windows. On Linux, after it finishes, replace PyTorch with the")
+        print("ROCm build using the command from https://pytorch.org/get-started/locally/ (choose ROCm).")
+        print("Installing the CPU build for now.")
+        return install_cpu()
+    if PY != r["python"]:
+        print(f"\nAMD's ROCm {r['version']} build of PyTorch for Windows exists only for Python "
+              f"{r['python'][0]}.{r['python'][1]}; this is Python {PY[0]}.{PY[1]}.")
+        print(f"To use it, create a venv with Python {r['python'][0]}.{r['python'][1]} and run this installer in it.")
+        print("Using DirectML instead.")
+        return install_directml()
+    print(f"\nInstalling PyTorch + ROCm {r['version']} from repo.radeon.com (a large download, several GB)...")
+    print(f"Needs Windows 11 and AMD driver {r['driver']}.")
+    ok = pip("install", "--no-cache-dir", *[r["base"] + f for f in r["sdk"]]) and \
+         pip("install", "--no-cache-dir", *[r["base"] + f for f in r["torch"]])
+    if ok:
+        ok, out = python_check(CUDA_SMOKE_TEST)
+        if ok:
+            print(f"  OK: {out}")
+            return "rocm"
+        print(f"  ROCm PyTorch installed but does not work on this GPU ({out.splitlines()[-1] if out else 'unknown error'})")
+        print(f"  (check the driver is {r['driver']}; AMD lists these cards for this release: {r['listed_gpus']})")
+    else:
+        print("  The ROCm packages could not be installed -- see the pip output above.")
+    print("\nGoing back to DirectML.")
+    pip("uninstall", "-y", "torch", "torchvision", *ROCM_PACKAGES)
+    return install_directml()
 
 def install_cuda():
     drv = driver_cuda_version()
@@ -294,8 +356,8 @@ def main():
     print()
 
     backend = choose_backend()
-    remove_existing_torch()
-    installed = {"cuda": install_cuda, "directml": install_directml, "cpu": install_cpu}[backend]()
+    remove_existing_torch(keep_rocm_sdk=(backend == "rocm"))
+    installed = {"cuda": install_cuda, "rocm": install_rocm, "directml": install_directml, "cpu": install_cpu}[backend]()
     install_requirements()
     check_ffmpeg()
     gui = pick_gui(choice)

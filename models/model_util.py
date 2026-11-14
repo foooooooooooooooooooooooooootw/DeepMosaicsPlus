@@ -34,7 +34,7 @@ def setup_device(opt):
         return torch.device('cpu'), 'cpu'
     if torch.cuda.is_available():
         device = torch.device('cuda')
-        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"Using {gpu_backend_name()} device: {torch.cuda.get_device_name(0)}")
         return device, 'cuda'
     if DIRECTML_AVAILABLE:
         try:
@@ -46,6 +46,18 @@ def setup_device(opt):
             print(f"DirectML initialization failed: {e}, falling back to CPU")
     print("No CUDA or DirectML device available, using CPU (training will be very slow)")
     return torch.device('cpu'), 'cpu'
+
+DEFAULT_INPUT_SIZE = 512   # size the video model runs at when nothing else says (was 256)
+
+def is_rocm():
+    """True when this PyTorch is an AMD ROCm build. ROCm builds drive AMD GPUs
+    through the SAME torch.cuda API (device 'cuda', torch.cuda.is_available()),
+    so every CUDA code path works unchanged; only names/messages differ.
+    torch.version.hip is the ROCm (HIP) version on such builds, None otherwise."""
+    return bool(getattr(torch.version, 'hip', None))
+
+def gpu_backend_name():
+    return 'ROCm' if is_rocm() else 'CUDA'
 
 def checkpoint_info_path(model_path):
     return os.path.splitext(model_path)[0] + '.json'
@@ -65,23 +77,29 @@ def checkpoint_input_size(model_path):
 
 def resolve_model_input_size(opt):
     """Set opt.input_size, the size the video model runs at: explicit
-    --infer_size, else the checkpoint's recorded size, else 256. A model
-    trained at one size and run at another still produces output, just a
-    worse one (mosaic blocks look a different size than it learned), so a
-    non-default size is always reported."""
+    --infer_size, else the checkpoint's recorded size, else DEFAULT_INPUT_SIZE
+    (512). A model trained at one size and run at another still produces
+    output, but possibly a worse one (mosaic blocks look a different size than
+    it learned), so the size and where it came from are always reported."""
     explicit = int(getattr(opt, 'infer_size', 0) or 0)
     recorded = checkpoint_input_size(opt.model_path) if getattr(opt, 'model_path', None) else None
-    opt.input_size = explicit or recorded or 256
+    opt.input_size = explicit or recorded or DEFAULT_INPUT_SIZE
     if explicit and recorded and explicit != recorded:
         print(f"[model] WARNING: --infer_size {explicit} differs from the {recorded}px this model was trained at")
-    if opt.input_size != 256 or recorded:
-        src = 'from --infer_size' if explicit else 'from model_info.json'
-        print(f"[model] Input size: {opt.input_size}px ({src})", flush=True)
+    if explicit:
+        src = 'from --infer_size'
+    elif recorded:
+        src = 'from model_info.json'
+    else:
+        src = ('default; this model has no model_info.json. If it was trained at 256px and the '
+               'result looks worse than before, set the model input size to 256')
+    print(f"[model] Input size: {opt.input_size}px ({src})", flush=True)
     return opt.input_size
 
 def resolve_inference_device(opt):
     """Decide the inference device ONCE (call right after option parsing) and
-    record it on opt: opt.device_type ('cuda' | 'directml' | 'cpu'),
+    record it on opt: opt.device_type ('cuda' | 'directml' | 'cpu'; an AMD ROCm
+    build is 'cuda' too, with opt.device_label 'ROCm'),
     opt.infer_device, opt.device_label. Prints one line the GUI reads to show
     its device badge:  [device] Inference: <TYPE> | <details>
 
@@ -92,7 +110,7 @@ def resolve_inference_device(opt):
     """
     requested = str(getattr(opt, 'requested_gpu_id', opt.gpu_id))
     opt.device_type, opt.infer_device = 'cpu', torch.device('cpu')
-    detail = 'requested with --gpu_id -1' if requested == '-1' else 'no CUDA or DirectML device available'
+    detail = 'requested with --gpu_id -1' if requested == '-1' else 'no CUDA, ROCm or DirectML device available'
     explained = False   # set when a CUDA self-test failure has already been explained above
     if requested != '-1':
         if opt.gpu_id != '-1' and torch.cuda.is_available():
@@ -105,7 +123,7 @@ def resolve_inference_device(opt):
                 for line in _cuda_failure_report(err):
                     print(f"[device] {line}", flush=True)
                 opt.gpu_id = '-1'          # everything downstream must now stay off CUDA
-                detail = f"CUDA failed its self-test ({err[:80]}); see the messages above"
+                detail = f"{gpu_backend_name()} failed its self-test ({err[:80]}); see the messages above"
                 explained = True
         elif DIRECTML_AVAILABLE:
             try:
@@ -120,7 +138,7 @@ def resolve_inference_device(opt):
                 detail = f"DirectML failed to initialise ({e})"
     if opt.device_type == 'cpu' and requested != '-1' and not explained:
         detail += _cpu_fallback_reason()
-    opt.device_label = {'cuda': 'CUDA', 'directml': 'DirectML', 'cpu': 'CPU'}[opt.device_type]
+    opt.device_label = {'cuda': gpu_backend_name(), 'directml': 'DirectML', 'cpu': 'CPU'}[opt.device_type]
     print(f"[device] Inference: {opt.device_label} | {detail}", flush=True)
     return opt.infer_device
 
@@ -158,6 +176,13 @@ def _cuda_failure_report(err):
         built_for = ", ".join(torch.cuda.get_arch_list()) or "unknown"
     except Exception:
         built_for = "unknown"
+    if is_rocm():
+        return [f"ROCm self-test FAILED: {err}",
+                f"  GPU: {name}",
+                f"  This PyTorch ({torch.__version__}) is an AMD ROCm {torch.version.hip} build.",
+                "  -> ROCm on Windows supports only some Radeon cards and needs a recent AMD driver. Update the "
+                "AMD driver, or run python install_script.py and choose DirectML, which works on any DirectX 12 GPU.",
+                "  Falling back to the CPU for this run."]
     lines = [f"CUDA self-test FAILED: {err}",
              f"  GPU: {name} (compute capability {major}.{minor} = {arch})",
              f"  This PyTorch ({torch.__version__}, built for CUDA {torch.version.cuda}) has kernels for: {built_for}"]
@@ -186,7 +211,10 @@ def _cpu_fallback_reason():
     interpreter and build makes that visible in the log."""
     import sys
     build = torch.__version__
-    if torch.version.cuda is None:
+    if is_rocm():
+        why = (f"this PyTorch is an AMD ROCm {torch.version.hip} build but it sees no supported GPU "
+               f"(check the AMD driver version and that the card is supported by ROCm)")
+    elif torch.version.cuda is None:
         why = "this PyTorch is a CPU-only build"
     else:
         why = f"this PyTorch supports CUDA {torch.version.cuda} but sees no CUDA GPU (check the NVIDIA driver)"

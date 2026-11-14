@@ -1,5 +1,5 @@
 """
-DeepMosaicsPlus 1.2.1 — Modern 3-panel workstation UI
+DeepMosaicsPlus 1.3.0 — Modern 3-panel workstation UI
 Layout: Left sidebar (config) · Centre (frame viewport) · Bottom (run bar + log)
 
 Run with:  python deepmosaicui_qt2.py
@@ -737,7 +737,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DeepMosaicsPlus 1.2.1")
+        self.setWindowTitle("DeepMosaicsPlus 1.3.0")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(1100, 700)
         self.resize(1280, 820)
@@ -799,7 +799,7 @@ class MainWindow(QMainWindow):
         )
         tb.addWidget(app_lbl)
 
-        ver_lbl = QLabel("v1.2.1")
+        ver_lbl = QLabel("v1.3.0")
         ver_lbl.setStyleSheet(
             f"font-size: 11px; color: {C['text_dim']}; background: transparent;"
             f" margin-left: 6px;"
@@ -1045,9 +1045,9 @@ class MainWindow(QMainWindow):
         self.infer_size_sel.addItems(["Auto", "256", "384", "512"])
         self.infer_size_sel.setToolTip(
             "Input size the video model runs at.\n"
-            "Auto: the size recorded next to the model (model_info.json from training), else 256.\n"
-            "Set it by hand if a model was trained at another size and its .json is missing --\n"
-            "running a model at a different size than it was trained at gives worse results.")
+            "Auto: the size recorded next to the model (model_info.json from training), else 512.\n"
+            "Models trained before sizes were recorded (256px) have no .json: if their result looks\n"
+            "worse at 512, choose 256 here. 512 takes about 4x the time and memory of 256.")
         sb.addLayout(_row(_rl("Model input size"), self.infer_size_sel, None))
 
         # Result
@@ -1214,6 +1214,12 @@ class MainWindow(QMainWindow):
         self.no_feather_cb  = QCheckBox("No edge feathering")
         self.all_mosaic_cb  = QCheckBox("All mosaic areas (slower)")
         self.debug_cb       = QCheckBox("Debug mode")
+        self.fp16_cb        = QCheckBox("Half precision (experimental)")
+        self.fp16_cb.setToolTip(
+            "Run the video model in 16-bit floats on CUDA / ROCm: usually faster and about half the\n"
+            "GPU memory, with a very slightly different result. Ignored on DirectML and CPU;\n"
+            "switches itself back to full precision if the GPU rejects it.")
+        sb.addWidget(self.fp16_cb)
         sb.addWidget(self.no_feather_cb)
         sb.addWidget(self.all_mosaic_cb)
         sb.addWidget(self.debug_cb)
@@ -1343,6 +1349,7 @@ class MainWindow(QMainWindow):
             dn = self.tr_down_in.text().strip()
             if dn and dn != "10":          cmd.extend(["--tr_down", dn])
         if self.no_feather_cb.isChecked(): cmd.append("--no_feather")
+        if self.fp16_cb.isChecked(): cmd.append("--fp16")
         if self.all_mosaic_cb.isChecked(): cmd.append("--all_mosaic_area")
         ma = self.min_area_in.text().strip()
         if ma and ma != "300":             cmd.extend(["--min_mosaic_area", ma])
@@ -2010,6 +2017,7 @@ class MainWindow(QMainWindow):
 
     def _set_device_badge(self, label: str, detail: str = ""):
         colors = {"CUDA": (C['green'], C['green_dim'], C['green_bd']),
+                  "ROCm": (C['red'], C['red_dim'], C['red_bd']),
                   "DirectML": (C['purple'], C['purple_dim'], C['purple_bd']),
                   "CPU": (C['amber'], C['surface2'], C['border2'])}
         fg, bg, bd = colors.get(label, (C['text_dim'], C['surface2'], C['border2']))
@@ -2038,7 +2046,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DeepMosaicsPlus")
-    app.setApplicationVersion("1.2.1")
+    app.setApplicationVersion("1.3.0")
     app.setStyleSheet(QSS)
     for family in ("Inter", "Segoe UI", "SF Pro Text", "Helvetica Neue"):
         if family in QFontDatabase.families():

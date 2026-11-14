@@ -100,7 +100,7 @@ def run_video_model_on_image(img, net, opt):
     on a still image, not as equivalent to what it produces on real video.
     """
     N, T, S = 2, 5, 3
-    INPUT_SIZE = int(getattr(opt, 'input_size', 256))   # see model_util.resolve_model_input_size
+    INPUT_SIZE = int(getattr(opt, 'input_size', 512))   # see model_util.resolve_model_input_size
     device = next(net.parameters()).device
 
     # INTER_AREA when shrinking: cubic/linear skip pixels on large downscales,
@@ -174,16 +174,51 @@ def get_ROI_position(img,net,opt,keepsize=True):
     x,y,halfsize,area = impro.boundingSquare(mask, 1)
     return mask,x,y,halfsize,area
 
+def run_segment_batch(imgs, net, size=360):
+    """run_segment for several SAME-SIZED images in one forward pass (one GPU call
+    instead of len(imgs)). Returns a list of masks identical to run_segment's."""
+    small = [impro.resize(img, size) for img in imgs]
+    arr = np.stack(small).transpose((0, 3, 1, 2))                    # B,3,h,w (BGR, as run_segment)
+    device = next(net.parameters()).device
+    batch = torch.from_numpy(np.ascontiguousarray(arr)).to(device).float() / 255.0
+    with data.inference_context(device):
+        out = net(batch)
+    return [data.tensor2im(out, gray=True, is0_1=True, batch_index=i) for i in range(len(imgs))]
+
 def get_mosaic_position(img_origin, net_mosaic_pos, opt):
-    h, w = img_origin.shape[:2]
-    
     # Run segmentation
     try:
         mask = run_segment(img_origin, net_mosaic_pos, size=360, gpu_id=opt.gpu_id)
     except Exception as e:
         print(f"Segmentation error: {e}")
         return None, 0, 0, 0
-    
+    return mask_to_position(mask, img_origin.shape[0], img_origin.shape[1], opt)
+
+def get_mosaic_positions_batch(imgs, net_mosaic_pos, opt, pool=None):
+    """get_mosaic_position for a list of frames: one batched forward pass on the
+    GPU, then the per-frame mask clean-up (full-resolution resize, threshold,
+    connected components -- all CPU work in OpenCV, which releases the GIL) spread
+    over `pool` threads. Returns a list of (mask, x, y, size), same values as
+    calling get_mosaic_position per frame. Falls back to per-frame calls when the
+    frames differ in size, on DirectML (kept on its proven per-frame path) or if
+    the batched pass fails."""
+    device = next(net_mosaic_pos.parameters()).device
+    same = len({img.shape for img in imgs}) == 1
+    masks = None
+    if len(imgs) > 1 and same and not data.is_directml(device):
+        try:
+            masks = run_segment_batch(imgs, net_mosaic_pos, size=360)
+        except Exception as e:
+            print(f"Batched segmentation failed ({e}); using one frame at a time")
+    if masks is None:
+        return [get_mosaic_position(img, net_mosaic_pos, opt) for img in imgs]
+    jobs = [(m, img.shape[0], img.shape[1], opt) for m, img in zip(masks, imgs)]
+    if pool is not None:
+        return list(pool.map(lambda a: mask_to_position(*a), jobs))
+    return [mask_to_position(*a) for a in jobs]
+
+def mask_to_position(mask, h, w, opt):
+    """Raw segmentation output -> (clean full-size mask, centre x, centre y, half size)."""
     if mask is None or mask.size == 0:
         return None, 0, 0, 0
     

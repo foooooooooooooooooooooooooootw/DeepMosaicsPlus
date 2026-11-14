@@ -25,6 +25,8 @@ import time
 import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from util import storage as _storage
+_storage.redirect_caches()
 
 import numpy as np
 import cv2

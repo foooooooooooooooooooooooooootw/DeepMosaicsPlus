@@ -46,7 +46,7 @@ opt.parser.add_argument('--scene_accept_ratio', type=float, default=1.0,
          'whole scene even if the rest was perfectly usable. Lowering this can substantially increase '
          'how much footage gets accepted, at the cost of occasionally including a scene where the ROI '
          'was only reliably detected part of the time.')
-opt.parser.add_argument('--outsize', type=int ,default= 286,help='')
+opt.parser.add_argument('--outsize', type=int ,default= 572,help='size (px) crops are stored at: 572 for 512px training (the default), 286 for 256px')
 opt.parser.add_argument('--startcnt', type=int ,default= 0,help='')
 opt.parser.add_argument('--minsize', type=int ,default= 96,help='minimal roi size')
 opt.parser.add_argument('--no_sclectscene', action='store_true', help='')  

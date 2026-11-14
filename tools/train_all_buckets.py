@@ -35,6 +35,8 @@ import shutil
 import platform
 import subprocess
 import argparse
+import codecs
+import time
 import json
 
 # Windows consoles often default to a non-UTF-8 code page (cp1252/cp437),
@@ -48,6 +50,7 @@ except Exception:
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from util import diagnose
 
 
 def link_or_copy(src, dst):
@@ -102,6 +105,46 @@ def build_merged_dataset(work_dir, bucket_label, synthetic_dataset, real_pairs_d
     return merged_dir, n_synth, n_real
 
 
+def bucket_finished(savename):
+    """(finished?, description). A bucket is finished when train.py wrote checkpoints/<savename>/completed.json.
+    Buckets trained before that marker existed are recognised from train_log.txt: the last run in it reached
+    its final iteration and did not fail, and a checkpoint file exists."""
+    import re
+    folder = os.path.join(ROOT, 'checkpoints', savename)
+    marker = os.path.join(folder, 'completed.json')
+    if os.path.exists(marker):
+        try:
+            with open(marker) as f:
+                info = json.load(f)
+            return True, f"finished {info.get('finished', '')}, {info.get('iterations', '?')} iterations at {info.get('finesize', '?')}px"
+        except Exception:
+            return True, "finished"
+    log_path = os.path.join(folder, 'train_log.txt')
+    try:
+        has_ckpt = any(n.endswith('_G.pth') for n in os.listdir(folder))
+        with open(log_path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 600000))
+            text = f.read().decode('utf-8', errors='replace').replace('\r', '\n')
+    except OSError:
+        return False, 'no training log or checkpoint folder yet'
+    # Only the last run in the log counts. (A 'Traceback' is NOT a sign of failure: tensorboardX prints a
+    # harmless one at every exit. Failures are marked by this script's own 'FAILED' line.)
+    run = text.split('\n===== ')[-1]
+    if not has_ckpt:
+        return False, 'no checkpoint (*_G.pth) saved yet'
+    if 'FAILED' in run:
+        return False, 'the last run failed'
+    if 'Saving final checkpoint' in run or 'Saved ' in run and '_G.pth' in run.split('Saved ')[-1][:40]:
+        return True, "the last run saved its final checkpoint (from the log)"
+    progress = re.findall(r'(\d+)/(\d+) \[', run)
+    if progress and int(progress[-1][1]) > 0 and int(progress[-1][0]) >= int(progress[-1][1]) - 1:
+        return True, f"reached iteration {progress[-1][0]} of {progress[-1][1]} (from the log)"
+    if progress:
+        return False, f"the last run stopped at iteration {progress[-1][0]} of {progress[-1][1]}"
+    return False, 'the last run did not get past the start'
+
+
 def resolve_python_exe():
     """Prefer python.exe over pythonw.exe for launching subprocesses.
     If this script itself was launched via pythonw.exe (e.g. because it was
@@ -136,6 +179,11 @@ def main():
     parser.add_argument('--train_script', default=os.path.join('train', 'clean', 'train.py'))
     parser.add_argument('--buckets', default=None,
         help='comma-separated subset of buckets to run, e.g. "1,3" — default: all buckets in the manifest')
+    parser.add_argument('--redo_finished', action='store_true',
+        help='train buckets again even if they already finished (by default finished buckets are skipped, '
+             'so a run that was interrupted continues with the first unfinished bucket)')
+    parser.add_argument('--no_resume', action='store_true',
+        help='train an unfinished bucket from the start instead of resuming it from its newest checkpoint')
     parser.add_argument('--dry_run', action='store_true', help='build merged folders and print commands, but do not actually launch training')
     args, train_args = parser.parse_known_args()
     if train_args and train_args[0] == '--':
@@ -160,6 +208,18 @@ def main():
 
     for bucket in bucket_labels:
         print(f"\n=== Bucket {bucket}% ===")
+        done, detail = bucket_finished(f'clean_{bucket}pct')
+        if done and not args.redo_finished:
+            print(f"  Already finished ({detail}); skipping. Tick 'Train finished buckets again' (or pass --redo_finished) to train it again.",
+                  flush=True)
+            continue
+        resume = False
+        if not args.redo_finished and not args.no_resume:
+            ck = os.path.join(ROOT, 'checkpoints', f'clean_{bucket}pct')
+            resume = os.path.isdir(ck) and any(n.endswith('_G.pth') for n in os.listdir(ck))
+        if detail:
+            print(f"  Not finished yet: {detail}. " + ("Resuming from its newest checkpoint." if resume else "Training it from the start."),
+                  flush=True)
         merged_dir, n_synth, n_real = build_merged_dataset(
             args.work_dir, bucket, args.synthetic_dataset, args.real_pairs_dataset)
         print(f"  merged dataset: {n_synth} synthetic folder(s) + {n_real} real-pair folder(s) -> {merged_dir}")
@@ -177,6 +237,8 @@ def main():
         if n_synth > 0:
             cmd += ['--dataset_mosaic_pct', bucket]
         cmd += train_args
+        if resume and '--continue_train' not in cmd:
+            cmd += ['--continue_train']
 
         print(f"  command: {' '.join(cmd)}")
         if args.dry_run:
@@ -195,21 +257,68 @@ def main():
         # real console). Relying on inherited stdio handles through a
         # multi-level subprocess chain is exactly the kind of thing that can
         # work in one launch context and silently fail in another.
-        process = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
-        for line in process.stdout:
-            print(line, end='', flush=True)
-        process.wait()
-        if process.returncode != 0:
-            print(f"  ** training for bucket {bucket}% exited with code {process.returncode} - "
-                  f"stopping here rather than continuing to the next bucket. **")
-            sys.exit(process.returncode)
+        #
+        # The output is read as raw bytes and decoded as UTF-8 here. Reading it in
+        # text mode used Windows' default code page (cp1252), which has no
+        # characters for the progress-bar blocks (e.g. the VGG download bar), and
+        # crashed with UnicodeDecodeError. Chunks (not lines) are passed through so
+        # carriage returns survive: progress bars then update in place in the GUI
+        # instead of printing a new line for every update.
+        #
+        # Everything the training prints is also written to a log file, so the
+        # reason for a failure survives even if the window showing it is closed.
+        print(f"  system: {diagnose.system_status(ROOT)}", flush=True)
+        for warning in diagnose.low_resources(ROOT):
+            print(f"  ** WARNING: {warning}", flush=True)
+        log_dir = os.path.join(ROOT, 'checkpoints', savename)
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, 'train_log.txt')
+        env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1', PYTHONFAULTHANDLER='1')
+        started = time.time()
+        printed = 0
+        with open(log_path, 'a', encoding='utf-8', errors='replace') as log:
+            log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')}  {' '.join(cmd)}\n")
+            process = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, env=env)
+            decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+            while True:
+                chunk = process.stdout.read1(65536)
+                if not chunk:
+                    break
+                text = decoder.decode(chunk)
+                printed += len(text.strip())
+                sys.stdout.write(text)
+                sys.stdout.flush()
+                log.write(text.replace('\r\n', '\n').replace('\r', '\n'))
+                log.flush()
+            sys.stdout.write(decoder.decode(b'', final=True))
+            process.wait()
+            code = process.returncode
+            if code != 0:
+                took = time.time() - started
+                lines = [f"\n  ** Training for bucket {bucket}% FAILED after {took:.0f}s. Exit code {diagnose.explain_exit(code)}"]
+                if printed == 0:
+                    lines.append("  ** It printed nothing at all, so Python itself could not start or was stopped at once. "
+                                 "Check that this Python works: run it in a terminal with:  "
+                                 f"\"{cmd[0]}\" -c \"import torch; print(torch.__version__)\"")
+                else:
+                    lines.append("  ** If there is no 'Traceback' or 'Fatal Python error' above, the process was ended from outside "
+                                 "Python: most often Windows ran out of memory (RAM + page file), or the GPU runtime stopped it.")
+                lines.append(f"  ** System now: {diagnose.system_status(ROOT)}")
+                lines += [f"  ** {w}" for w in diagnose.low_resources(ROOT)]
+                lines.append(f"  ** Full output of this run: {log_path}")
+                lines.append("  ** Stopping here rather than continuing to the next bucket.")
+                msg = "\n".join(lines)
+                print(msg, flush=True)
+                log.write(msg + "\n")
+        if code != 0:
+            sys.exit(code if 0 < code < 256 else 1)
 
     print("\nDone. Trained checkpoints are under checkpoints/<savename>/ as usual for train/clean/train.py — "
           "pick the checkpoint you want per bucket and copy/rename it into your --model_manifest's expected "
           "path (e.g. pretrained_models/mosaic/clean_1pct.pth). Copy the matching .json too "
           "(5000_G.json -> clean_1pct.json): it records the size the model was trained at, which inference reads "
-          "so it runs the model at that size. Without it, inference assumes 256px.")
+          "so it runs the model at that size. Without it, inference assumes 512px.")
 
 
 if __name__ == '__main__':

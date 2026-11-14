@@ -1,4 +1,4 @@
-# DeepMosaicsPlus 1.2.1 - Python dependencies
+# DeepMosaicsPlus 1.3.0 - Python dependencies
 #
 # PyTorch is NOT listed here: the right build depends on your GPU, and pip
 # cannot pick it automatically. The easiest way is to run install_script.py,
@@ -12,6 +12,10 @@
 #   AMD / Intel on Windows (DirectML, Python 3.8-3.12 only):
 #     pip install torch-directml
 #     (this installs the torch/torchvision versions it requires)
+#   AMD on Windows 11 (ROCm, Python 3.12 only, supported Radeon cards, recent driver):
+#     use install_script.py and type "rocm" -- the wheels come from repo.radeon.com
+#     and are listed in ROCM_WINDOWS at the top of that script. Cannot be combined
+#     with torch-directml (each needs its own torch).
 #   CPU only:
 #     pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 #

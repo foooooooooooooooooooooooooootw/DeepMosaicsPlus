@@ -163,7 +163,7 @@ if __name__ == '__main__':
     except Exception as ex:
         print('--------------------ERROR--------------------')
         print('--------------Environment--------------')
-        print('DeepMosaicsPlus: 1.2.1 (fork of DeepMosaics 0.5.1)')
+        print('DeepMosaicsPlus: 1.3.0 (fork of DeepMosaics 0.5.1)')
         print('Python:',sys.version)
         import torch
         print('Pytorch:',torch.__version__)

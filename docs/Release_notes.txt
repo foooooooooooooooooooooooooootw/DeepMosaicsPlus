@@ -1,16 +1,20 @@
-DeepMosaicsPlus: 1.2.1 (fork of DeepMosaics 0.5.1)
-For more detail, please view on github: https://github.com/HypoX64/DeepMosaics
-
 Releases History
-  V1.2.1 (DeepMosaicsPlus)
+  V1.3.0 (DeepMosaicsPlus)
     New:
-      1. Add new formats for images (PNG, WebP, TIFF). WebP and PNG support transparency.
-      2. Experimental new option added to model trainer that increases resolution of training data
+      1.512px is now the default size for training (--finesize 512, datasets stored at 572px) and for running the video model; a model's recorded size (model_info.json) still wins, and --infer_size / "Model input size" overrides it (use 256 for older models if 512 looks worse)
+      2.Faster cleaning: frames are decoded ahead on a background thread, mosaic detection runs a whole batch per GPU call, paste-back and frame encoding use several threads, and on CUDA/ROCm the model's input is resized and normalised on the GPU (--gpu_preprocess); a [timing] line reports where the time went
+      3.Optional half precision for the video model on CUDA/ROCm (--fp16 / "Half precision (experimental)")
+      4.AMD PyTorch+ROCm (Windows) as a backend: the installer can install and verify it ("rocm"), the device badge shows ROCm, and it is used for both inference and training through the normal GPU path
+      5.tools/make_generated_dataset.py: training clips without the ROI detector, either procedural animation ("generated") or random regions of your own clean videos/images ("crops", e.g. for anime). Generated clips come in an anime look and a real-life look (--style) with an adjustable share of beige/pink tones (--skin_tone); the dataset tool has a button for them (step 2b)
+      6.Dataset & Training tool redesigned: one Workflow screen with the four steps as cards (settings and a live status line on each), "Run selected steps" chains them (e.g. generate clips, then train), everything is checked before a run starts, progress bar and elapsed time, Stop also stops the training child process, choice of buckets to train, GPU memory estimate against your card. 1 sample per batch takes between 3.6GB to 4GB. If you have 4 samples per batch that should be about 16GB VRAM needed. 
+      7.Training reports where its time goes: data= / gpu= per iteration, and a [speed] summary at iterations 20 and 200 with GPU memory use and a warning when memory is full or training waits for data; the dataset tool estimates how long a run will take
+      8.Training checks memory before it starts: fewer data-loading processes when system RAM is short ([memory] line), and a warning with a safe batch size when the batch will not fit in GPU memory
     
     Fix:
-      1. Fstring backslash deleted. Now it's compatible with Python 3.8 and doesn't require 3.12 anymore. 
-      2. Removed deepmosaicui.pyw since it was redundant
-
+      1.The final encode could start before the last cleaned frames were written (the writer was only waited on for 30 seconds); detection masks are now guaranteed to be on disk before cleaning starts
+      2.Caches and temp files no longer go to the system drive: PyTorch downloads, the ROCm kernel cache and temporary files are kept in a folder beside the project (<project>_cache; DMP_CACHE_DIR to choose another)
+      3.--continue_train did nothing in train/clean/train.py: every run restarted at iteration 0. It now loads the newest checkpoint (generator, discriminator and optimizer state, saved in resume_state.pth) and continues counting from that iteration, so TensorBoard curves continue too
+  
   V1.2.0 (DeepMosaicsPlus)
     New:
       1.Configurable video codec on output encode: h264 / hevc / av1 / vp9 / h264_nvenc / hevc_nvenc
