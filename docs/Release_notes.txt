@@ -15,6 +15,15 @@ Releases History
       2.Caches and temp files no longer go to the system drive: PyTorch downloads, the ROCm kernel cache and temporary files are kept in a folder beside the project (<project>_cache; DMP_CACHE_DIR to choose another)
       3.--continue_train did nothing in train/clean/train.py: every run restarted at iteration 0. It now loads the newest checkpoint (generator, discriminator and optimizer state, saved in resume_state.pth) and continues counting from that iteration, so TensorBoard curves continue too
   
+  V1.2.1 (DeepMosaicsPlus)
+    New:
+      1. Add new formats for images (PNG, WebP, TIFF). WebP and PNG support transparency.
+      2. Experimental new option added to model trainer that increases resolution of training data
+
+    Fix:
+      1. Fstring backslash deleted. Now it's compatible with Python 3.8 and doesn't require 3.12 anymore.
+      2. Removed deepmosaicui.pyw since it was redundant
+
   V1.2.0 (DeepMosaicsPlus)
     New:
       1.Configurable video codec on output encode: h264 / hevc / av1 / vp9 / h264_nvenc / hevc_nvenc
