@@ -47,7 +47,7 @@ def setup_device(opt):
     print("No CUDA or DirectML device available, using CPU (training will be very slow)")
     return torch.device('cpu'), 'cpu'
 
-DEFAULT_INPUT_SIZE = 512   # size the video model runs at when nothing else says (was 256)
+DEFAULT_INPUT_SIZE = 256   # size the video model runs at when it has no .json: models without one are the original 256px models
 
 def is_rocm():
     """True when this PyTorch is an AMD ROCm build. ROCm builds drive AMD GPUs
@@ -78,7 +78,7 @@ def checkpoint_input_size(model_path):
 def resolve_model_input_size(opt):
     """Set opt.input_size, the size the video model runs at: explicit
     --infer_size, else the checkpoint's recorded size, else DEFAULT_INPUT_SIZE
-    (512). A model trained at one size and run at another still produces
+    (256: models without a .json predate recorded sizes and were trained at 256px). A model trained at one size and run at another still produces
     output, but possibly a worse one (mosaic blocks look a different size than
     it learned), so the size and where it came from are always reported."""
     explicit = int(getattr(opt, 'infer_size', 0) or 0)
@@ -91,8 +91,8 @@ def resolve_model_input_size(opt):
     elif recorded:
         src = 'from model_info.json'
     else:
-        src = ('default; this model has no model_info.json. If it was trained at 256px and the '
-               'result looks worse than before, set the model input size to 256')
+        src = ('default; this model has no .json beside it, so it is treated as an original 256px model. '
+               'If it was trained at another size, set the model input size')
     print(f"[model] Input size: {opt.input_size}px ({src})", flush=True)
     return opt.input_size
 

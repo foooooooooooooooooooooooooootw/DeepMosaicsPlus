@@ -100,7 +100,7 @@ def run_video_model_on_image(img, net, opt):
     on a still image, not as equivalent to what it produces on real video.
     """
     N, T, S = 2, 5, 3
-    INPUT_SIZE = int(getattr(opt, 'input_size', 512))   # see model_util.resolve_model_input_size
+    INPUT_SIZE = int(getattr(opt, 'input_size', 256))   # see model_util.resolve_model_input_size
     device = next(net.parameters()).device
 
     # INTER_AREA when shrinking: cubic/linear skip pixels on large downscales,

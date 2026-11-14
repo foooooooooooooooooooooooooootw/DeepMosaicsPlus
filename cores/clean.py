@@ -85,7 +85,7 @@ def _adopt_checkpoint_size(opt, model_path):
     was given explicitly)."""
     from models import model_util
     size = model_util.checkpoint_input_size(model_path)
-    if size and not int(getattr(opt, 'infer_size', 0) or 0) and size != getattr(opt, 'input_size', 512):
+    if size and not int(getattr(opt, 'infer_size', 0) or 0) and size != getattr(opt, 'input_size', 256):
         print(f"[auto_model] {os.path.basename(model_path)} was trained at {size}px -> running it at {size}px")
         opt.input_size = size
 
@@ -569,7 +569,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     N, T, S = 2, 5, 3
     LEFT_FRAME = (N * S)
     POOL_NUM = LEFT_FRAME * 2 + 1
-    INPUT_SIZE = int(getattr(opt, 'input_size', 512))   # see model_util.resolve_model_input_size
+    INPUT_SIZE = int(getattr(opt, 'input_size', 256))   # see model_util.resolve_model_input_size
     FRAME_POS = np.linspace(0, (T-1)*S, T, dtype=np.int64)
     
     # Pre-allocate arrays to avoid repeated memory allocation
@@ -584,7 +584,7 @@ def cleanmosaic_video_fusion(opt, netG, netM):
     start_frame = int(imagepaths[0][7:13])
     positions = get_mosaic_positions(opt, netM, imagepaths, savemask=True)[(start_frame-1):]
     netG = select_netG_for_size_video(opt, netG, imagepaths, positions)
-    if int(getattr(opt, 'input_size', 512)) != INPUT_SIZE:
+    if int(getattr(opt, 'input_size', 256)) != INPUT_SIZE:
         # --auto_model picked a bucket model trained at a different size
         INPUT_SIZE = int(opt.input_size)
         input_stream_array = np.empty((1, T, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)

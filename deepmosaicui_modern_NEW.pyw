@@ -1045,9 +1045,9 @@ class MainWindow(QMainWindow):
         self.infer_size_sel.addItems(["Auto", "256", "384", "512"])
         self.infer_size_sel.setToolTip(
             "Input size the video model runs at.\n"
-            "Auto: the size recorded next to the model (model_info.json from training), else 512.\n"
-            "Models trained before sizes were recorded (256px) have no .json: if their result looks\n"
-            "worse at 512, choose 256 here. 512 takes about 4x the time and memory of 256.")
+            "Auto: the size recorded next to the model (the .json written by training), else 256,\n"
+            "since models without a .json are the original 256px models.\n"
+            "Models trained here at 512 get a .json, so Auto runs them at 512 (about 4x the time and memory of 256).")
         sb.addLayout(_row(_rl("Model input size"), self.infer_size_sel, None))
 
         # Result
