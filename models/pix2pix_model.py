@@ -347,6 +347,10 @@ class ResnetGenerator(nn.Module):
 
         self.model = nn.Sequential(*model)
 
+    def forward(self, input):
+        """Standard forward"""
+        return self.model(input)
+
 
 class ResnetBlock(nn.Module):
     """Define a Resnet block"""
