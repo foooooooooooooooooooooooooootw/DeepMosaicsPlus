@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/c2deeb1f-4566-408b-bdb9-71b3605c5c1e
 This is an optimized fork of the original DeepMosaics project with significant performance improvements:
 
 - 🚀 **6x faster processing** - Optimized GPU utilization (1h → 10 mins on AMD 7800XT)
-- 🎮 **AMD GPU support** - DirectML integration for AMD graphics cards
+- 🎮 **AMD GPU support** - ROCm support for newer AMD cards and DirectML integration for any gpu
 - ⚡ **Hardware acceleration** - DirectX 11 for AMD, CUDA for NVIDIA
 - 🎬 **Modern UI** - Modern video-editor style UI that shows what is being detected and cleaned in real time
 - 🔧 **Auto-detection** - Automatically detects and uses available GPU
