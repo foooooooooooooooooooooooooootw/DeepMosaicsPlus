@@ -86,7 +86,7 @@ python deepmosaic.py --media_path "weenus.mkv" --model_path "clean_youknow_video
 - torchvision
 
 #### GPU Support
-- **AMD GPUs**: torch_directml (auto-detects DirectML devices)
+- **AMD GPUs**: torch+rocm OR torch_directml (auto-detects DirectML devices)
 - **NVIDIA GPUs**: torch+CUDA & CUDA toolkit 
 
 #### GUI (Optional)
