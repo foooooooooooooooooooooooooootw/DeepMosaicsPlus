@@ -76,8 +76,8 @@ opt.parser.add_argument('--dataset',type=str,default='./datasets/face/', help=''
 opt.parser.add_argument('--dataset_test',type=str,default='./datasets/face_test/', help='')
 opt.parser.add_argument('--dataset_mosaic_pct', type=float, default=None,
     help='EXPERIMENTAL: train a size-specialized model by constraining synthetically-generated '
-         'mosaic blocks to a narrow band around this percentage of each training image\'s shorter '
-         'side (matching the --auto_model detector\'s own convention), instead of the default wide '
+         'mosaic blocks to a band (0.75-1.33x) around this block size, in %% of the network input (--finesize): the unit '
+         '--auto_model measures in (block size as %% of the square the model sees), instead of the default wide '
          'random range. Only affects video folders using synthetic mosaic generation (origin_image/ '
          '+ mask/) — folders with real paired data (origin_image/ + mosaic_image/) are unaffected, '
          'since those already use one fixed real size. Leave unset for the original one-size-fits-all '

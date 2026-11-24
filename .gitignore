@@ -136,7 +136,6 @@ checkpoints/
 mask/
 mask_old/
 origin_image/
-datasets/
 dataset/
 test*
 video_tmp/

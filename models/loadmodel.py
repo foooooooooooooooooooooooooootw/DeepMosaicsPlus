@@ -81,7 +81,7 @@ def bisenet(opt,type='roi'):
 
 # ── Size-based model auto-selection (--auto_model) ──────────────────────────
 # Maps a detected mosaic block size (see util.mosaic.estimate_mosaic_block_pct,
-# expressed as % of the frame's shorter side) to a specific pretrained clean
+# expressed as % of the square crop the clean model is fed) to a specific pretrained clean
 # model checkpoint. Manifest format is a flat JSON object of
 # {"<bucket_pct>": "<path to .pth, relative to the manifest file's folder>"}.
 # Selection is nearest-bucket, clamped to the manifest's own min/max buckets.
@@ -101,9 +101,19 @@ def select_model_by_pct(pct, manifest_path):
     closest trained model rather than erroring out.
     """
     manifest = load_size_manifest(manifest_path)
-    buckets = sorted(manifest.keys())
-    nearest = min(buckets, key=lambda b: abs(b - pct))
-    rel_path = manifest[nearest]
     base_dir = os.path.dirname(os.path.abspath(manifest_path))
-    abs_path = rel_path if os.path.isabs(rel_path) else os.path.normpath(os.path.join(base_dir, rel_path))
-    return abs_path, nearest
+
+    def resolve(b):
+        rel_path = manifest[b]
+        return rel_path if os.path.isabs(rel_path) else os.path.normpath(os.path.join(base_dir, rel_path))
+
+    # Only buckets whose checkpoint is actually installed; if none are, keep the old behaviour
+    # (the caller reports the load failure and keeps its current model).
+    installed = [b for b in manifest if os.path.isfile(resolve(b))]
+    buckets = sorted(installed or manifest.keys())
+    nearest = min(buckets, key=lambda b: abs(b - pct))
+    if installed and len(installed) < len(manifest):
+        wanted = min(sorted(manifest.keys()), key=lambda b: abs(b - pct))
+        if wanted != nearest:
+            print(f"[auto_model] the {wanted:g}% bucket model is not installed; using the nearest installed one ({nearest:g}%)")
+    return resolve(nearest), nearest

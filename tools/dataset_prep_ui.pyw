@@ -23,6 +23,7 @@ import re
 import sys
 import json
 import time
+import shutil
 import subprocess
 
 try:
@@ -64,7 +65,10 @@ DEFAULTS = {
     'gen_clips': 200,
     'gen_style': 'mixed',
     'gen_skin_pct': 60,
+    'gen_detail_pct': 100,
+    'gen_texture_dir': os.path.join(ROOT, 'datasets', 'raw', 'textures'),
     'train_buckets': '',
+    'train_mode': 'single',          # 'single' = original DeepMosaics training (one model); 'buckets' = one model per size
     'redo_finished': False,
     'steps_enabled': [False, False, True, True],
     'extra_dataset_args': '',
@@ -87,7 +91,7 @@ def vram_needed(batch, size):
     return 1.0 + batch * GB_PER_SAMPLE[size]
 
 VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
+IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff')
 
 # Same palette as the main DeepMosaicsPlus window, so the two tools look like one program.
 C = {
@@ -275,6 +279,84 @@ def real_pairs_summary(folder):
         if n.startswith('bucket_'):
             out[n[len('bucket_'):]] = len(subfolders(os.path.join(folder, n)))
     return out
+
+
+def _bucket_finished(savename):
+    """Same test step 4 uses to skip finished buckets (completed.json, else the training log)."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('_tab', os.path.join(ROOT, 'tools', 'train_all_buckets.py'))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.bucket_finished(savename)
+    except Exception as e:
+        return False, f"could not check ({e})"
+
+
+SINGLE_MODEL_DST = os.path.join(ROOT, 'pretrained_models', 'clean_single.pth')
+
+
+def _savename(bucket):
+    return 'clean_single' if bucket == 'single' else f'clean_{bucket}pct'
+
+
+def _label(bucket):
+    return 'Single model' if bucket == 'single' else f'{bucket}%'
+
+
+def plan_model_install(manifest_path, single=False):
+    """For every bucket in the manifest: the newest checkpoint training produced
+    (checkpoints/clean_<bucket>pct/<N>_G.pth + .json) and where the manifest wants it.
+    single: the one model of single-model training (checkpoints/clean_single) instead,
+    installed as pretrained_models/clean_single.pth."""
+    if single:
+        manifest, base = {'single': SINGLE_MODEL_DST}, ROOT
+        items = list(manifest.items())
+    else:
+        with open(manifest_path, encoding='utf-8') as f:
+            manifest = json.load(f)
+        base = os.path.dirname(os.path.abspath(manifest_path))
+        items = sorted(manifest.items(), key=lambda kv: float(kv[0]))
+    plan = []
+    for bucket, rel in items:
+        dst = rel if os.path.isabs(rel) else os.path.join(base, rel)
+        folder = os.path.join(ROOT, 'checkpoints', _savename(bucket))
+        item = {'bucket': bucket, 'dst': dst, 'src': None, 'iteration': None,
+                'finished': False, 'note': '', 'has_json': False, 'replaces': os.path.exists(dst)}
+        iters = []
+        if os.path.isdir(folder):
+            for name in os.listdir(folder):
+                m = re.fullmatch(r'(\d+)_G\.pth', name)
+                if m:
+                    iters.append(int(m.group(1)))
+        if not iters:
+            item['note'] = 'no checkpoint yet'
+        else:
+            it = max(iters)
+            item['src'] = os.path.join(folder, f'{it}_G.pth')
+            item['iteration'] = it
+            item['has_json'] = os.path.exists(os.path.join(folder, f'{it}_G.json'))
+            item['finished'], detail = _bucket_finished(_savename(bucket))
+            item['note'] = 'finished' if item['finished'] else ('not finished' + (f': {detail}' if detail else ''))
+        plan.append(item)
+    return plan
+
+
+def install_model(item):
+    """Copy one bucket's checkpoint (and its .json) to the manifest path. An existing model there
+    is kept as <name>.previous.pth / .json, replacing an older backup."""
+    dst = item['dst']
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    src_json = os.path.splitext(item['src'])[0] + '.json'
+    dst_json = os.path.splitext(dst)[0] + '.json'
+    stem = os.path.splitext(dst)[0]
+    for old, backup in ((dst, stem + '.previous.pth'), (dst_json, stem + '.previous.json')):
+        if os.path.exists(old):
+            os.replace(old, backup)
+    shutil.copy2(item['src'], dst + '.part')
+    os.replace(dst + '.part', dst)
+    if os.path.exists(src_json):
+        shutil.copy2(src_json, dst_json)
 
 
 def manifest_summary(path):
@@ -506,7 +588,8 @@ class DatasetPrepWindow(QMainWindow):
 
         # -- 3 generated clips
         c3 = StepCard(3, "Generated clips", "Adds clips to the synthetic pool without the ROI model: procedural animation, "
-                      "or random regions of your clean footage (works for anime).", self._run_single)
+                      "or random regions of your clean footage (works for anime). Footage is much better: procedural "
+                      "clips are smooth, so a model trained mostly on them learns to smooth blocks, not to restore detail.", self._run_single)
         self.gen_kind_combo = QComboBox()
         self.gen_kind_combo.addItem("Procedural animation (no footage)", "generated")
         self.gen_kind_combo.addItem("Random regions of clean footage", "crops")
@@ -528,12 +611,39 @@ class DatasetPrepWindow(QMainWindow):
         self.gen_skin_spin = QSpinBox(); self.gen_skin_spin.setRange(0, 100); self.gen_skin_spin.setSuffix(" %")
         c3.body.addLayout(field("Beige / pink tones", self.gen_skin_spin,
                                 "Share of colours taken from beige, pink and tan shades.\n0 % = any colour, 100 % = only those shades."))
+        self.gen_detail_spin = QSpinBox(); self.gen_detail_spin.setRange(0, 100); self.gen_detail_spin.setSuffix(" %")
+        c3.body.addLayout(field("Detail", self.gen_detail_spin,
+                                "Fine detail for the model to restore: multi-scale texture, line art and hair-like strokes,\n"
+                                "and video-like compression. 0 % = the old smooth look, which mostly teaches the model\n"
+                                "to smooth blocks over."))
+        tex_box = QWidget(); tex_row = QHBoxLayout(tex_box); tex_row.setContentsMargins(0, 0, 0, 0); tex_row.setSpacing(6)
+        self.gen_texture_edit = QLineEdit(); self.gen_texture_edit.setPlaceholderText("optional: folder of images")
+        tex_btn = QPushButton("…"); tex_btn.setFixedWidth(32)
+        tex_btn.clicked.connect(self._browse_textures)
+        self.gen_texture_edit.editingFinished.connect(self._refresh_status)
+        tex_row.addWidget(self.gen_texture_edit, 1); tex_row.addWidget(tex_btn)
+        c3.body.addLayout(field("Texture images", tex_box,
+                                "Patches of these images fill backgrounds and shapes: photos or texture packs of fabric,\n"
+                                "skin-like surfaces, hair, wood, foliage, stone... Any size and format; subfolders included.\n"
+                                "Default: datasets/raw/textures. While the folder is empty, only drawn detail is used."), stretch=1)
         c3.body.addStretch()
         self.cards.append(c3); col.addWidget(c3)
 
         # -- 4 train
-        c4 = StepCard(4, "Train", "Trains one model per bucket from the synthetic pool plus that bucket's real pairs. "
-                      "Checkpoints go to checkpoints/clean_<N>pct/.", self._run_single)
+        c4 = StepCard(4, "Train", "Single model: the original DeepMosaics training, one model from the whole synthetic pool "
+                      "and all real pairs (checkpoints/clean_single/). Size buckets (experimental): one model per bucket "
+                      "(checkpoints/clean_<N>pct/).", self._run_single)
+        self.train_mode_combo = QComboBox()
+        self.train_mode_combo.addItem("Single model (original)", 'single')
+        self.train_mode_combo.addItem("Size buckets (experimental)", 'buckets')
+        self.train_mode_combo.currentIndexChanged.connect(self._on_train_mode)
+        c4.body.addLayout(field("Training mode", self.train_mode_combo,
+                                "Single model: one model for every mosaic size, with the original wide random mosaic sizes.\n"
+                                "Use it in the main program as a normal model (Install trained models puts it at\n"
+                                "pretrained_models/clean_single.pth).\n\n"
+                                "Size buckets: one model per mosaic size in the size manifest; the main program's\n"
+                                "'Auto-select model by mosaic size' picks one per video. Experimental: it is not yet\n"
+                                "known to beat a single model."))
         self.batchsize_spin = QSpinBox(); self.batchsize_spin.setRange(1, 256)
         c4.body.addLayout(field("Batch size", self.batchsize_spin, "Samples per training step. Limited by GPU memory: see the estimate below."))
         self.epoch_spin = QSpinBox(); self.epoch_spin.setRange(1, 100000)
@@ -558,6 +668,12 @@ class DatasetPrepWindow(QMainWindow):
         self.len_hint.setWordWrap(True)
         c4.layout().addWidget(self.len_hint)
         open_row = QHBoxLayout()
+        inst = QPushButton("Install trained models…")
+        inst.setToolTip("Copy each bucket's newest checkpoint (and its .json) to the file the size manifest\n"
+                        "expects in pretrained_models/mosaic, so the main program's\n"
+                        "'Auto-select model by mosaic size' uses them.")
+        inst.clicked.connect(self._install_models)
+        open_row.addWidget(inst)
         for text, target in (("Open checkpoints folder", lambda: os.path.join(ROOT, 'checkpoints')),
                              ("Open synthetic pool folder", lambda: self._path_fields['synthetic_pool_dir'].text())):
             b = QPushButton(text); b.setObjectName("link")
@@ -671,10 +787,11 @@ class DatasetPrepWindow(QMainWindow):
     def _build_manifest_tab(self):
         w = QWidget()
         layout = QVBoxLayout(w); layout.setContentsMargins(18, 14, 18, 14); layout.setSpacing(10)
-        layout.addWidget(dim("Each bucket is a mosaic block size (% of the frame's shorter side) with the model file that handles it. "
+        layout.addWidget(dim("Each bucket is a mosaic block size (% of the square the model sees: the crop around the mosaic area) with the model file that handles it. "
                              "Training makes one model per bucket; copy the checkpoint you like to the path shown here (with its .json)."))
         btn_row = QHBoxLayout()
-        for text, slot in (("Reload", self._load_manifest), ("Add bucket", self._add_bucket_row),
+        for text, slot in (("Install trained models…", self._install_models),
+                           ("Reload", self._load_manifest), ("Add bucket", self._add_bucket_row),
                            ("Delete selected", self._delete_bucket_row), ("Save manifest", self._save_manifest)):
             b = QPushButton(text); b.clicked.connect(slot); btn_row.addWidget(b)
         btn_row.addStretch()
@@ -722,9 +839,10 @@ class DatasetPrepWindow(QMainWindow):
         if clips:
             per_epoch = int(clips * 0.8) // batch * 82
             total = per_epoch * epochs
-            text = (f"Length: about {total:,} iterations per bucket ({plural(clips, 'pool clip')} → {per_epoch:,} per epoch × "
+            unit = 'bucket' if self.train_mode_combo.currentData() == 'buckets' else 'model'
+            text = (f"Length: about {total:,} iterations per {unit} ({plural(clips, 'pool clip')} → {per_epoch:,} per epoch × "
                     f"{plural(epochs, 'epoch')}), a checkpoint every {self.save_freq_spin.value():,}. "
-                    f"At 1 second per iteration that is {total / 3600:,.0f} hours per bucket.")
+                    f"At 1 second per iteration that is {total / 3600:,.0f} hours per {unit}.")
             long_run = total > 300000
             if long_run:
                 want = max(1, round(100000 / max(1, per_epoch)))
@@ -738,7 +856,14 @@ class DatasetPrepWindow(QMainWindow):
         procedural = self.gen_kind_combo.currentData() == 'generated'
         self.gen_style_combo.setEnabled(procedural)
         self.gen_skin_spin.setEnabled(procedural)
+        self.gen_detail_spin.setEnabled(procedural)
+        self.gen_texture_edit.setEnabled(procedural)
         self._refresh_status()
+
+    def _browse_textures(self):
+        path = QFileDialog.getExistingDirectory(self, "Folder of texture images", self.gen_texture_edit.text() or ROOT)
+        if path:
+            self.gen_texture_edit.setText(path)
 
     def _update_run_summary(self, *_):
         chosen = [c.number for c in self.cards if c.check.isChecked()]
@@ -770,7 +895,12 @@ class DatasetPrepWindow(QMainWindow):
         self.gen_clips_spin.setValue(int(self.cfg.get('gen_clips', 200)))
         self.gen_style_combo.setCurrentIndex(max(0, self.gen_style_combo.findData(self.cfg.get('gen_style', 'mixed'))))
         self.gen_skin_spin.setValue(int(self.cfg.get('gen_skin_pct', 60)))
+        self.gen_detail_spin.setValue(int(self.cfg.get('gen_detail_pct', 100)))
+        self.gen_texture_edit.setText(self.cfg.get('gen_texture_dir') or DEFAULTS['gen_texture_dir'])
         self.buckets_edit.setText(self.cfg.get('train_buckets', ''))
+        i = self.train_mode_combo.findData(self.cfg.get('train_mode', 'single'))
+        self.train_mode_combo.setCurrentIndex(max(0, i))
+        self._on_train_mode()
         self.redo_check.setChecked(bool(self.cfg.get('redo_finished', False)))
         self.extra_dataset_edit.setText(self.cfg.get('extra_dataset_args', ''))
         self.extra_train_edit.setText(self.cfg.get('extra_train_args', ''))
@@ -797,7 +927,10 @@ class DatasetPrepWindow(QMainWindow):
         self.cfg['gen_clips'] = self.gen_clips_spin.value()
         self.cfg['gen_style'] = self.gen_style_combo.currentData() or 'mixed'
         self.cfg['gen_skin_pct'] = self.gen_skin_spin.value()
+        self.cfg['gen_detail_pct'] = self.gen_detail_spin.value()
+        self.cfg['gen_texture_dir'] = self.gen_texture_edit.text().strip()
         self.cfg['train_buckets'] = self.buckets_edit.text().strip()
+        self.cfg['train_mode'] = self.train_mode_combo.currentData()
         self.cfg['redo_finished'] = self.redo_check.isChecked()
         self.cfg['steps_enabled'] = [c.check.isChecked() for c in self.cards]
         self.cfg['extra_dataset_args'] = self.extra_dataset_edit.text().strip()
@@ -855,10 +988,20 @@ class DatasetPrepWindow(QMainWindow):
             else:
                 self.cards[2].set_status(f"Source: {plural(src_v or 0, 'video')}, {plural(src_i or 0, 'image')} of clean footage.  " + pool_txt, 'ok')
         else:
-            self.cards[2].set_status("Needs no footage or model.  " + pool_txt, 'ok')
+            tex = self.gen_texture_edit.text().strip()
+            n_tex = count_files(tex, IMAGE_EXTS, recursive=True) if tex and os.path.isdir(tex) else 0
+            tex_txt = f"Textures: {plural(n_tex, 'image')}." if n_tex else "No texture images (drawn detail only)."
+            self.cards[2].set_status(f"Needs no footage or model. {tex_txt}  " + pool_txt, 'ok')
         # 4 train
         man = manifest_summary(p['model_manifest'])
-        if man is None:
+        if self.train_mode_combo.currentData() == 'single':
+            if not total and not buckets:
+                self.cards[3].set_status("Single model: no training clips yet. Run a step above first "
+                                         "(or tick it to run before training).", 'warn')
+            else:
+                self.cards[3].set_status(f"Single model from {plural(total, 'pool clip')} + "
+                                         f"{plural(sum(buckets.values()), 'real-pair clip')} (all buckets).", 'ok')
+        elif man is None:
             self.cards[3].set_status("Size manifest not found or unreadable (Folders & models tab).", 'bad')
         elif not total and not buckets:
             self.cards[3].set_status(f"{plural(man[0], 'bucket')} in the manifest, but no training clips yet: run a step above first "
@@ -1056,6 +1199,66 @@ class DatasetPrepWindow(QMainWindow):
         self.manifest_table.setItem(row, 2, QTableWidgetItem(""))
         self.manifest_table.setItem(row, 3, QTableWidgetItem(""))
 
+    def _on_train_mode(self, *_):
+        buckets = self.train_mode_combo.currentData() == 'buckets'
+        self.buckets_edit.setEnabled(buckets)
+        self.redo_check.setText("Train finished buckets again" if buckets else "Train the finished model again")
+        if hasattr(self, 'cards') and len(self.cards) > 3 and hasattr(self, '_path_fields'):
+            self._refresh_status()
+
+    def _install_models(self):
+        if self._busy():
+            QMessageBox.information(self, "Busy", "Wait for the running step to finish (a bucket may still be training).")
+            return
+        path = self._path_fields['model_manifest'].text()
+        single = self.train_mode_combo.currentData() == 'single'
+        try:
+            plan = plan_model_install(path, single=single)
+        except Exception as e:
+            QMessageBox.warning(self, "No manifest", f"Could not read the size manifest:\n{path}\n\n{e}")
+            return
+        ready = [p for p in plan if p['src'] and p['finished']]
+        unfinished = [p for p in plan if p['src'] and not p['finished']]
+        lines = []
+        for p in plan:
+            name = os.path.basename(p['dst'])
+            if not p['src']:
+                lines.append(f"{_label(p['bucket'])}: skipped, {p['note']}")
+                continue
+            state = "" if p['finished'] else f"  [{p['note']}]"
+            extra = " (replaces the current one, kept as .previous)" if p['replaces'] else ""
+            nojson = "  [no .json: it would run at 256 px]" if not p['has_json'] else ""
+            lines.append(f"{_label(p['bucket'])}: {os.path.basename(p['src'])} -> {name}{extra}{state}{nojson}")
+        if not ready and not unfinished:
+            QMessageBox.information(self, "Nothing to install", "No trained checkpoint yet.\n\n" + "\n".join(lines))
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Install trained models")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"Copy {len(ready)} finished model(s) to {os.path.dirname(os.path.abspath(plan[0]['dst']))}?")
+        box.setInformativeText("\n".join(lines))
+        b_fin = box.addButton(f"Install finished ({len(ready)})", QMessageBox.ButtonRole.AcceptRole) if ready else None
+        b_all = box.addButton(f"Install all ({len(ready) + len(unfinished)})", QMessageBox.ButtonRole.AcceptRole) if unfinished else None
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        chosen = box.clickedButton()
+        if chosen is None or chosen not in (b_fin, b_all):
+            return
+        todo = ready + (unfinished if chosen is b_all else [])
+        self._log(f"\n=== Installing {len(todo)} model(s) ===")
+        failed = 0
+        for p in todo:
+            try:
+                install_model(p)
+                self._log(f"  {p['bucket']}%: {os.path.basename(p['src'])} -> {p['dst']}"
+                          + ("" if p['finished'] else "  (not finished)"))
+            except Exception as e:
+                failed += 1
+                self._log(f"  {p['bucket']}%: FAILED ({e})")
+        self._log("Done." + (f" {failed} failed." if failed else "") +
+                  " In the main program, tick 'Auto-select model by mosaic size' to use them.")
+        self._load_manifest()
+
     def _delete_bucket_row(self):
         rows = sorted({idx.row() for idx in self.manifest_table.selectedIndexes()}, reverse=True)
         for r in rows:
@@ -1124,16 +1327,26 @@ class DatasetPrepWindow(QMainWindow):
                     raise ValueError("the clean footage folder does not exist")
                 cmd += ['--source', cfg['synthetic_source_dir']]
             else:
-                cmd += ['--style', cfg['gen_style'], '--skin_tone', str(cfg['gen_skin_pct'] / 100.0)]
+                cmd += ['--style', cfg['gen_style'], '--skin_tone', str(cfg['gen_skin_pct'] / 100.0),
+                        '--detail', str(cfg.get('gen_detail_pct', 100) / 100.0)]
+                tex = cfg.get('gen_texture_dir', '')
+                if tex:
+                    if not os.path.isdir(tex):
+                        raise ValueError("the texture images folder does not exist")
+                    if count_files(tex, IMAGE_EXTS, recursive=True):     # an empty folder is simply not used
+                        cmd += ['--textures', tex]
             return cmd, ROOT
-        if not os.path.exists(cfg['model_manifest']):
-            raise ValueError("the size manifest was not found")
+        single = cfg.get('train_mode', 'single') == 'single'
+        if not single and not os.path.exists(cfg['model_manifest']):
+            raise ValueError("the size manifest was not found (needed for size buckets)")
         cmd = [py, os.path.join(ROOT, 'tools', 'train_all_buckets.py'),
                '--synthetic_dataset', cfg['synthetic_pool_dir'],
                '--real_pairs_dataset', cfg['real_pairs_dir'],
                '--model_manifest', cfg['model_manifest'],
                '--work_dir', os.path.join(ROOT, 'datasets', '_merged')]
-        if cfg['train_buckets']:
+        if single:
+            cmd += ['--single']
+        elif cfg['train_buckets']:
             cmd += ['--buckets', cfg['train_buckets'].replace(' ', '')]
         if cfg.get('redo_finished'):
             cmd += ['--redo_finished']

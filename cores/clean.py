@@ -89,7 +89,7 @@ def _adopt_checkpoint_size(opt, model_path):
         print(f"[auto_model] {os.path.basename(model_path)} was trained at {size}px -> running it at {size}px")
         opt.input_size = size
 
-def select_netG_for_size(opt, netG, img, mask):
+def select_netG_for_size(opt, netG, img, mask, size=None):
     """Single-image/frame version: if --auto_model is set, estimate the
     mosaic block size from (img, mask) and swap in the matching pretrained
     model from --model_manifest. Falls back to the passed-in netG on low
@@ -101,13 +101,17 @@ def select_netG_for_size(opt, netG, img, mask):
         from models import loadmodel
         min_conf = getattr(opt, 'auto_model_min_confidence', 0.15)
         min_pct, max_pct = _manifest_pct_bounds(opt.model_manifest)
-        est = mosaic_util.estimate_mosaic_block_pct(img, mask, min_pct=min_pct, max_pct=max_pct)
-        if est is None or est['confidence'] < min_conf:
+        if not size:
+            return netG
+        est = mosaic_util.estimate_crop_pct_multi([(img, mask, 2 * size)], min_confidence=min_conf,
+                                                  min_pct=min_pct, max_pct=max_pct)
+        if est is None:
             print(f"[auto_model] low-confidence size estimate, keeping current model")
             return netG
         model_path, bucket = loadmodel.select_model_by_pct(est['pct'], opt.model_manifest)
-        square_note = '' if est['is_square'] else ' (non-square block detected — verify manually)'
-        print(f"[auto_model] detected mosaic block ~{est['pct']:.2f}% of frame{square_note} "
+        square_note = '' if est['n_nonsquare'] == 0 else ' (non-square block detected — verify manually)'
+        print(f"[auto_model] mosaic block ~{est['pct']:.1f}% of the area the model sees "
+              f"({est['frame_pct']:.2f}% of the frame, area {est['crop_side']:.0f}px){square_note} "
               f"-> using {bucket:g}% bucket model ({os.path.basename(model_path)})")
         _adopt_checkpoint_size(opt, model_path)
         return _load_netG_cached(opt, model_path)
@@ -137,7 +141,7 @@ def select_netG_for_size_video(opt, netG, imagepaths, positions):
         step = max(1, len(candidates) // n_samples)
         sample_idxs = candidates[::step][:n_samples]
 
-        pairs = []
+        samples = []
         for i in sample_idxs:
             if i >= len(imagepaths):
                 continue
@@ -148,9 +152,9 @@ def select_netG_for_size_video(opt, netG, imagepaths, positions):
                 img = impro.imread(img_path)
                 mask = cv2.imread(mask_path, 0)
                 if img is not None and mask is not None:
-                    pairs.append((img, mask))
+                    samples.append((img, mask, 2 * positions[i][2]))   # the square crop the network is fed
 
-        result = mosaic_util.estimate_mosaic_block_pct_multi(pairs, min_confidence=min_conf, min_pct=min_pct, max_pct=max_pct)
+        result = mosaic_util.estimate_crop_pct_multi(samples, min_confidence=min_conf, min_pct=min_pct, max_pct=max_pct)
         if result is None:
             print("[auto_model] could not confidently estimate mosaic size, keeping current model")
             return netG
@@ -159,8 +163,9 @@ def select_netG_for_size_video(opt, netG, imagepaths, positions):
         square_note = ''
         if result['n_nonsquare'] > 0:
             square_note = f" ({result['n_nonsquare']}/{result['n_samples']} samples non-square — verify manually)"
-        print(f"[auto_model] detected mosaic block ~{result['pct']:.2f}% of frame "
-              f"(from {result['n_samples']} sampled frames){square_note} "
+        print(f"[auto_model] mosaic block ~{result['pct']:.1f}% of the area the model sees "
+              f"({result['frame_pct']:.2f}% of the frame, area ~{result['crop_side']:.0f}px; "
+              f"from {result['n_samples']} sampled frames){square_note} "
               f"-> using {bucket:g}% bucket model ({os.path.basename(model_path)})")
         _adopt_checkpoint_size(opt, model_path)
         return _load_netG_cached(opt, model_path)
@@ -341,7 +346,7 @@ def cleanmosaic_img(opt,netG,netM):
         if opt.traditional:
             img_fake = runmodel.traditional_cleaner(img_mosaic,opt)
         else:
-            netG = select_netG_for_size(opt, netG, img_origin, mask)
+            netG = select_netG_for_size(opt, netG, img_origin, mask, size)
             if opt.netG == 'video':
                 img_fake = runmodel.run_video_model_on_image(img_mosaic,netG,opt)
             else:
@@ -360,7 +365,7 @@ def cleanmosaic_img_server(opt,img_origin,netG,netM):
         if opt.traditional:
             img_fake = runmodel.traditional_cleaner(img_mosaic,opt)
         else:
-            netG = select_netG_for_size(opt, netG, img_origin, mask)
+            netG = select_netG_for_size(opt, netG, img_origin, mask, size)
             if opt.netG == 'video':
                 img_fake = runmodel.run_video_model_on_image(img_mosaic,netG,opt)
             else:

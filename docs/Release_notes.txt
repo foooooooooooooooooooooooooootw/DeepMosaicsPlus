@@ -1,4 +1,15 @@
 Releases History
+  V1.3.1 (DeepMosaicsPlus)
+    New:
+      1. Added classical single model training mode to UI tool 
+      2. New detail percentage for synthetic clips so that generated clips are given features over gradients. Models are made to recover detail
+      3. Textures can be taken from images, and I've added 3 basic ones to start (note: this synthetic generation + buckets are experimental aiming to cut down sourcing material while improving accuracy)
+      4. Texture images are kept at up to 2048 px on their longest side.
+
+    Fix:
+      1. Fix ResnetGenerator missing forward method
+      2. Fix mismatch between training and cleaning modes which messed up bucket sizes
+      
   V1.3.0 (DeepMosaicsPlus)
     New:
       1.512px is now the default size for training (--finesize 512, datasets stored at 572px) and for running the video model; a model's recorded size (model_info.json) still wins, and --infer_size / "Model input size" overrides it (use 256 for older models if 512 looks worse)
@@ -9,11 +20,16 @@ Releases History
       6.Dataset & Training tool redesigned: one Workflow screen with the four steps as cards (settings and a live status line on each), "Run selected steps" chains them (e.g. generate clips, then train), everything is checked before a run starts, progress bar and elapsed time, Stop also stops the training child process, choice of buckets to train, GPU memory estimate against your card. 1 sample per batch takes between 3.6GB to 4GB. If you have 4 samples per batch that should be about 16GB VRAM needed. 
       7.Training reports where its time goes: data= / gpu= per iteration, and a [speed] summary at iterations 20 and 200 with GPU memory use and a warning when memory is full or training waits for data; the dataset tool estimates how long a run will take
       8.Training checks memory before it starts: fewer data-loading processes when system RAM is short ([memory] line), and a warning with a safe batch size when the batch will not fit in GPU memory
+      9.Dataset & Training tool: "Training mode" on the Train step. Single model (original, the default) trains one model from the whole synthetic pool and the real pairs of all buckets, with the original wide random mosaic sizes (checkpoints/clean_single; tools/train_all_buckets.py --single). Size buckets (experimental) trains one model per mosaic size as before
+      10.Main GUI: "Auto-select model by mosaic size" (--auto_model) picks the bucket model matching the measured mosaic size and shows how many bucket models are installed; a missing bucket uses the nearest installed one. Dataset tool: "Install trained models" copies the newest finished checkpoint and its .json to where the program expects it (each bucket's manifest path, or pretrained_models/clean_single.pth); a replaced model is kept as .previous
+      11.Generated clips have detail to restore (--detail, "Detail" in step 3; on by default): multi-scale texture, line art and hair-like strokes, and video-like compression. --textures / "Texture images" fills backgrounds and shapes with patches of your own photos or texture packs. Detail 0 keeps the old smooth look, which mostly teaches the model to smooth blocks over
     
     Fix:
       1.The final encode could start before the last cleaned frames were written (the writer was only waited on for 30 seconds); detection masks are now guaranteed to be on disk before cleaning starts
       2.Caches and temp files no longer go to the system drive: PyTorch downloads, the ROCm kernel cache and temporary files are kept in a folder beside the project (<project>_cache; DMP_CACHE_DIR to choose another)
       3.--continue_train did nothing in train/clean/train.py: every run restarted at iteration 0. It now loads the newest checkpoint (generator, discriminator and optimizer state, saved in resume_state.pth) and continues counting from that iteration, so TensorBoard curves continue too
+      4.ResnetGenerator had no forward(), so resnet models (e.g. clean_youknow_resnet_9blocks.pth) failed with "missing the required forward function"
+      5.Size buckets measured the mosaic block size against the whole frame, but the clean model sees a crop around the mosaic area resized to its input, so blocks are several times larger to the model when the mosaic area is small. Real pairs landed in too-small buckets (2-3% instead of 4-5%) next to synthetic mosaics of the bucket's real size, and --auto_model picked models trained on much smaller blocks (blocks smoothed, no detail). Sizes are now % of the square the model sees everywhere: --auto_model, bucket_real_pairs.py (measured on the crop each pair is cut to) and --dataset_mosaic_pct (relative to --finesize, with a wider 0.75-1.33x range so neighbouring buckets overlap). Bucket models trained before this should be retrained, and real pairs re-sorted (step 1)
   
   V1.2.1 (DeepMosaicsPlus)
     New:

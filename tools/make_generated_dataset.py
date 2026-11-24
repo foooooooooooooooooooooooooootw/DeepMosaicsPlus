@@ -15,9 +15,13 @@ of clips serves every mosaic size.
                          shapes, fine surface texture, lens blur and sensor noise
                 mixed -- each clip is one or the other (default)
               --skin_tone sets how much of the colour is beige / pink / tan (default 0.6).
-              Needs no footage at all. Good for teaching the model block removal at a given
-              resolution and for flat-colour (anime-like) content; it contains no real
-              anatomy or texture, so mix it with real footage rather than train on it alone.
+              --detail (0..1, default 1) adds fine detail the mosaic destroys and the model has
+              to restore: multi-scale texture, line art and hair-like strokes, and (real look)
+              video compression. 0 gives the old smooth look.
+              --textures <folder of images> also fills backgrounds and shapes with patches of
+              real photos/textures (fabric, skin-like surfaces, wood, foliage...).
+              Needs no footage at all. It contains no real anatomy, so mix it with real
+              footage rather than train on it alone.
 
   crops       Random square regions of YOUR clean videos or images (--source), with the
               mosaic placed on a random area. No detection involved, so it works on content
@@ -27,6 +31,7 @@ of clips serves every mosaic size.
 Examples (run from the project folder):
   python tools/make_generated_dataset.py --mode generated --clips 200
   python tools/make_generated_dataset.py --clips 300 --style anime --skin_tone 0.8
+  python tools/make_generated_dataset.py --clips 300 --textures D:/texture_photos
   python tools/make_generated_dataset.py --mode crops --source D:/clean_anime --clips 500
   python tools/make_generated_dataset.py --mode generated --clips 4 --preview preview.jpg
 
@@ -173,6 +178,127 @@ def pattern_image(rng, size, pal):
     return a * m + b * (1 - m)
 
 
+def fractal_noise(rng, size, octaves=5, persistence=0.55, base_cells=3):
+    """Multi-scale noise in -1..1: coarse blotches down to pixel-level grain. Unlike the
+    smooth fields above, every mosaic block of it hides detail to restore."""
+    out = np.zeros((size, size), np.float32)
+    amp, total, cells = 1.0, 0.0, base_cells
+    for _ in range(octaves):
+        cells = min(cells, size)
+        layer = cv2.resize(rng.uniform(-1, 1, (cells, cells)).astype(np.float32), (size, size),
+                           interpolation=cv2.INTER_CUBIC)
+        out += layer * amp
+        total += amp
+        amp *= persistence
+        cells *= 2 + int(rng.integers(0, 2))
+    out /= max(total, 1e-6)
+    return out / max(1e-6, float(np.abs(out).max()))
+
+
+def add_texture(rng, img, strength):
+    """Modulate brightness with fractal noise (and sometimes a directional weave/grain)."""
+    size = img.shape[0]
+    tex = fractal_noise(rng, size, octaves=int(rng.integers(4, 7)), persistence=rng.uniform(0.45, 0.7),
+                        base_cells=int(rng.integers(2, 8)))
+    if rng.random() < 0.3:                           # fibres / brushed grain in one direction
+        streak = rng.normal(0, 1, (size, size)).astype(np.float32)
+        k = int(rng.integers(5, 25))
+        kernel = np.zeros((k, k), np.float32)
+        kernel[k // 2, :] = 1.0 / k
+        rot = cv2.getRotationMatrix2D((k / 2, k / 2), rng.uniform(0, 180), 1)
+        kernel = cv2.warpAffine(kernel, rot, (k, k))
+        streak = cv2.filter2D(streak, -1, kernel / max(1e-6, float(kernel.sum())))
+        tex = tex * 0.6 + streak / max(1e-6, float(np.abs(streak).max())) * 0.4
+    return img * (1 + tex[:, :, None] * strength)
+
+
+def draw_line_art(rng, canvas, pal, anime, amount):
+    """Thin detail a mosaic wipes out completely: tapered ink strokes, hair-like bundles of
+    near-parallel curves and fine scribbles (all anti-aliased), in place on a uint8 canvas."""
+    size = canvas.shape[0]
+    n_bundles = int(round(rng.integers(1, 5) * amount))
+    for _ in range(n_bundles):                       # hair / grass / fur
+        col = pal.color('dark') if (anime or rng.random() < 0.5) else pal.color()
+        start = rng.uniform(0.1, 0.9, 2) * size
+        direction = rng.normal(0, 1, 2); direction /= max(1e-6, float(np.linalg.norm(direction)))
+        length = rng.uniform(0.1, 0.45) * size
+        bend = rng.normal(0, 0.35)
+        spread = rng.uniform(0.02, 0.12) * size
+        normal = np.array([-direction[1], direction[0]])
+        for _ in range(int(rng.integers(8, 40))):
+            off = normal * rng.uniform(-spread, spread) + direction * rng.uniform(-0.05, 0.05) * size
+            ts = np.linspace(0, 1, 16)[:, None]
+            curve = start + off + direction * ts * length * rng.uniform(0.6, 1.1)                 + normal * (bend + rng.normal(0, 0.08)) * (ts ** 2) * length
+            pts = np.round(curve * 16).astype(np.int32)
+            shade = pal.shade(col, rng.uniform(-0.2, 0.25))
+            cv2.polylines(canvas, [pts], False, shade, 1, cv2.LINE_AA, 4)
+    n_strokes = int(round(rng.integers(1, 6) * amount))
+    for _ in range(n_strokes):                       # tapered ink strokes (anime line art): smooth curves
+        col = pal.color('dark')
+        p0 = rng.uniform(0, 1, 2) * size
+        n = 24
+        heading = rng.uniform(0, 2 * math.pi) + np.cumsum(rng.normal(0, 0.12, n))   # gently turning direction
+        step = rng.uniform(0.006, 0.02) * size
+        pts = p0 + np.cumsum(np.stack([np.cos(heading), np.sin(heading)], 1) * step, 0)
+        w_max = rng.uniform(1.5, 5 if anime else 3)
+        for i in range(len(pts) - 1):
+            w = max(1, int(round(w_max * math.sin(math.pi * (i + 0.5) / (len(pts) - 1)))))
+            cv2.line(canvas, tuple(int(v) for v in np.round(pts[i] * 16)), tuple(int(v) for v in np.round(pts[i + 1] * 16)),
+                     col, w, cv2.LINE_AA, 4)
+    if not anime and rng.random() < 0.5 * amount:    # fine scribbles: pores, freckles, specks
+        for _ in range(int(rng.integers(50, 400))):
+            c = tuple(int(v) for v in rng.uniform(0, size, 2))
+            cv2.circle(canvas, c, int(rng.integers(1, 3)), pal.shade(pal.color(), rng.uniform(-0.4, 0.1)), -1, cv2.LINE_AA)
+
+
+class TextureBank:
+    """Patches of real images (--textures) used as backgrounds and shape fills. A random
+    subset is loaded once, each shrunk to at most max_side px, so this stays fast and light
+    on memory (80 images at 2048 px: under 1 GB). 2048 keeps fine detail: patches are cut
+    from it and mostly shrunk further to the clip size, rarely enlarged."""
+
+    def __init__(self, folder, rng, max_images=80, max_side=2048):
+        self.images = []
+        _, paths = list_sources(folder)
+        if not paths:
+            return
+        for i in rng.permutation(len(paths))[:max_images]:
+            img = imread(paths[int(i)])
+            if img is None or min(img.shape[:2]) < 64:
+                continue
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif img.shape[2] == 4:
+                img = img[:, :, :3]
+            s = max_side / max(img.shape[:2])
+            if s < 1:
+                img = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            self.images.append(img)
+
+    def __len__(self):
+        return len(self.images)
+
+    def patch(self, rng, size, pal, anime):
+        """A size x size float32 BGR patch: a random region at a random scale, sometimes
+        tinted towards the clip's palette (keeps the beige/pink skew), posterised for anime."""
+        img = self.images[int(rng.integers(len(self.images)))]
+        h, w = img.shape[:2]
+        side = max(min(size, min(h, w)), int(min(h, w) * rng.uniform(0.25, 1.0)))   # avoid enlarging when possible
+        y, x = int(rng.integers(0, h - side + 1)), int(rng.integers(0, w - side + 1))
+        crop = img[y:y + side, x:x + side]
+        if rng.random() < 0.5:
+            crop = cv2.flip(crop, int(rng.integers(-1, 2)))
+        out = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA if side > size else cv2.INTER_CUBIC).astype(np.float32)
+        if rng.random() < 0.6:                        # keep the texture's light and detail, take the palette's colour
+            lum = cv2.cvtColor(out.astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32) / 128.0
+            out = out * 0.25 + np.float32(pal.color())[None, None, :] * lum[:, :, None] * 0.75
+        if anime and rng.random() < 0.6:              # cel look: few levels, slightly smoothed
+            levels = int(rng.integers(3, 7))
+            out = cv2.bilateralFilter(np.clip(out, 0, 255).astype(np.uint8), 7, 40, 7).astype(np.float32)
+            out = np.round(out / 255 * (levels - 1)) / (levels - 1) * 255
+        return np.clip(out, 0, 255)
+
+
 # ----------------------------------------------------------------------------- generated clips
 
 class Shape:
@@ -180,7 +306,7 @@ class Shape:
     anime: hard edges, dark outlines, flat fill with an optional hard-edged shadow band.
     real:  soft edges, no outline, smoothly shaded fill."""
 
-    def __init__(self, rng, size, pal, anchored=False):
+    def __init__(self, rng, size, pal, anchored=False, detail=0.0, textures=None):
         self.pal = pal
         anime = pal.style == 'anime'
         kinds = ['ellipse', 'polygon', 'blob', 'stroke', 'text', 'rect']
@@ -210,6 +336,13 @@ class Shape:
         # real: every shape is softly shaded; anime: only sometimes a gradient fill
         self.soft = 0.0 if anime else float(rng.uniform(0.6, 2.5) if rng.random() < 0.8 else rng.uniform(0.03, 0.08) * self.radius)
         self.fill = gradient_image(rng, size, _OneColor(pal, self.color)) if (not anime or rng.random() < 0.2) else None
+        if textures and rng.random() < 0.5 * max(detail, 0.3):
+            self.fill = textures.patch(rng, size, pal, anime)          # a real-image surface on this object
+        elif detail and self.fill is not None and rng.random() < detail:
+            self.fill = add_texture(rng, self.fill, rng.uniform(0.05, 0.25) * detail)
+        elif detail and not anime and rng.random() < detail * 0.5:
+            plain = np.empty((size, size, 3), np.float32); plain[:] = self.color
+            self.fill = add_texture(rng, plain, rng.uniform(0.05, 0.2) * detail)
         n = int(rng.integers(3, 9))
         ang = np.sort(rng.uniform(0, 2 * math.pi, n))
         rad = rng.uniform(0.45, 1.0, n)
@@ -307,13 +440,18 @@ class _OneColor:
         return self.pal.shade(bgr, amount)
 
 
-def render_generated_clip(rng, n_frames, size, style='anime', skin=0.5):
-    """Frames (uint8 BGR, size x size) of one procedural clip in the given style."""
+def render_generated_clip(rng, n_frames, size, style='anime', skin=0.5, detail=1.0, textures=None):
+    """Frames (uint8 BGR, size x size) of one procedural clip in the given style.
+    detail 0..1: fine texture, line art and compression; textures: optional TextureBank."""
     pal = Palette(rng, style, skin)
     anime = style == 'anime'
     kind = rng.choice(['flat', 'gradient', 'noise', 'pattern'], p=[0.25, 0.45, 0.15, 0.15] if anime else [0.05, 0.55, 0.3, 0.1])
     big = int(size * 1.5)                                     # background larger than the view, so the camera can move over it
-    if kind == 'flat':
+    if textures and rng.random() < (0.35 if anime else 0.6):
+        kind = 'texture'
+    if kind == 'texture':
+        bg = textures.patch(rng, big, pal, anime)
+    elif kind == 'flat':
         bg = np.empty((big, big, 3), np.float32); bg[:] = pal.color()
     elif kind == 'gradient':
         bg = gradient_image(rng, big, pal)
@@ -325,9 +463,22 @@ def render_generated_clip(rng, n_frames, size, style='anime', skin=0.5):
         # fine surface texture (skin, fabric, film): faint mid-frequency brightness variation
         tex = cv2.GaussianBlur(rng.normal(0, 1, (big, big)).astype(np.float32), (0, 0), rng.uniform(0.7, 2.5))
         bg = bg * (1 + (tex / max(1e-6, float(tex.std())) * rng.uniform(0.01, 0.05))[:, :, None])
+    if detail and kind != 'texture' and rng.random() < (0.5 if anime else 0.9) * detail:
+        bg = add_texture(rng, bg, rng.uniform(0.04, 0.12 if anime else 0.3) * detail)
     bg = np.clip(bg, 0, 255).astype(np.uint8)
+    if detail:
+        draw_line_art(rng, bg, pal, anime, detail)
     n_shapes = int(rng.integers(5, 18)) if anime else int(rng.integers(4, 12))
-    shapes = [Shape(rng, size, pal, anchored=(i % 2 == 1)) for i in range(n_shapes)]
+    shapes = [Shape(rng, size, pal, anchored=(i % 2 == 1), detail=detail, textures=textures) for i in range(n_shapes)]
+    # detail drawn on top of the shapes too, moving with the anchored ones near the middle (where the mosaic goes)
+    overlay = None
+    if detail and rng.random() < 0.7 * detail:
+        overlay = np.zeros((size, size, 3), np.uint8)
+        draw_line_art(rng, overlay, pal, anime, detail)
+        overlay_mask = (overlay.max(2) > 0).astype(np.float32)
+        overlay_mask = cv2.GaussianBlur(overlay_mask, (0, 0), 0.5)[:, :, None]
+        overlay_drift = rng.normal(0, 0.0006, 2) * size
+    jpeg_q = int(rng.integers(45, 90)) if (detail and rng.random() < (0.3 if anime else 0.6) * detail) else 0
     pan = rng.normal(0, 0.0025, 2) * size                    # camera pan, px per frame
     zoom_rate = rng.normal(0, 0.0012)
     if anime:      # clean digital picture: steady camera, sharp, at most the softness of video scaling
@@ -347,10 +498,20 @@ def render_generated_clip(rng, n_frames, size, style='anime', skin=0.5):
         canvas = cv2.warpAffine(bg, M, (size, size), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         for s in shapes:
             s.draw(canvas, t, cam)
+        if overlay is not None:
+            dx, dy = overlay_drift * t + cam['shift'] * 0.5
+            M2 = np.float32([[cam['zoom'], 0, (1 - cam['zoom']) * size / 2 + dx], [0, cam['zoom'], (1 - cam['zoom']) * size / 2 + dy]])
+            ov = cv2.warpAffine(overlay, M2, (size, size), flags=cv2.INTER_LINEAR)
+            om = cv2.warpAffine(overlay_mask, M2, (size, size), flags=cv2.INTER_LINEAR)[:, :, None]
+            canvas = (canvas * (1 - om) + ov * om).astype(np.uint8)
         if blur:
             canvas = cv2.GaussianBlur(canvas, (0, 0), blur)
         if grain:
             canvas = np.clip(canvas.astype(np.float32) + rng.normal(0, grain, canvas.shape), 0, 255).astype(np.uint8)
+        if jpeg_q:                                   # video-like compression artefacts, as in real censored footage
+            ok, enc = cv2.imencode('.jpg', canvas, [cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
+            if ok:
+                canvas = cv2.imdecode(enc, cv2.IMREAD_COLOR)
         frames.append(canvas)
     return frames
 
@@ -510,6 +671,12 @@ def main():
     p.add_argument('--skin_tone', type=float, default=0.6,
                    help='[generated] 0..1: share of colours taken from beige / pink / tan shades. '
                         '0 = any colour, 1 = only those shades')
+    p.add_argument('--detail', type=float, default=1.0,
+                   help='[generated] 0..1: fine texture, line art / hair-like strokes and compression to restore. '
+                        '0 = the old smooth look (mostly teaches the model to smooth blocks)')
+    p.add_argument('--textures', default=None,
+                   help='[generated] optional folder of images (photos, texture packs) whose patches fill '
+                        'backgrounds and shapes. Searched recursively; any size, more variety is better')
     p.add_argument('--source', default=None, help='[crops] folder of clean videos and/or images (searched recursively)')
     p.add_argument('--min_side', type=int, default=0,
                    help='[crops] smallest source region (px) to accept. Default: half of --outsize, so no crop is enlarged more than 2x')
@@ -525,6 +692,15 @@ def main():
 
     rng = np.random.default_rng(a.seed)
     os.makedirs(a.savedir, exist_ok=True)
+    detail = float(np.clip(a.detail, 0, 1))
+    textures = None
+    if a.mode == 'generated' and a.textures:
+        if not os.path.isdir(a.textures):
+            sys.exit(f"--textures folder not found: {a.textures}")
+        textures = TextureBank(a.textures, rng)
+        if not len(textures):
+            sys.exit(f"No usable images (64px or larger) in {a.textures}")
+        print(f"Textures: {len(textures)} image(s) loaded from {a.textures}")
     prefix = 'gen_' if a.mode == 'generated' else 'crop_'
     index = next_index(a.savedir, prefix)
     min_side = a.min_side or a.outsize // 2
@@ -545,7 +721,7 @@ def main():
         if a.mode == 'generated':
             style = a.style if a.style != 'mixed' else ('anime' if rng.random() < a.anime_share else 'real')
             styles[style] = styles.get(style, 0) + 1
-            frames, native = render_generated_clip(rng, a.frames, a.outsize, style, skin), a.outsize
+            frames, native = render_generated_clip(rng, a.frames, a.outsize, style, skin, detail, textures), a.outsize
         else:
             use_video = vids and (not imgs or rng.random() < len(vids) / (len(vids) + len(imgs) * 0.25))
             if use_video:
@@ -588,7 +764,8 @@ def main():
               f"(try --min_sharpness 0, a lower --min_side, or more footage).")
     if a.mode == 'generated':
         print("Styles: " + ", ".join(f"{v} {k}" for k, v in sorted(styles.items())) + f"; skin-tone share {skin:.0%}")
-        print("Note: generated clips contain no real texture or anatomy. Use them alongside real footage, not instead of it.")
+        print(f"Detail {detail:.0%}" + (f", textures from {len(textures)} image(s)" if textures else ", no texture images") + ".")
+        print("Note: generated clips contain no real anatomy. Use them alongside real footage, not instead of it.")
 
 
 if __name__ == '__main__':

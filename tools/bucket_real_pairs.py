@@ -7,8 +7,9 @@ each pair sharing the SAME filename across the two folders — this:
      mosaic_image/ (censored) — the exact layout util/dataloader.py's
      real-pair training path expects (see util.dataloader.VideoLoader).
   2. Runs the same block-size detector used by tools/test_mosaic_size.py on
-     the censored frames to estimate the mosaic's size as % of frame short
-     side.
+     the censored frames to estimate the mosaic's block size as % of the
+     training crop the pair is cut to (the unit buckets use; see
+     util.mosaic.estimate_crop_pct_multi).
   3. Copies the resulting pair folder into <output_dir>/bucket_<N>/<name>/,
      where N is the nearest bucket in your --model_manifest.
 
@@ -90,7 +91,10 @@ def _edge_median(values, window):
     return np.array([np.median(padded[i:i + window]) for i in range(len(values))], dtype=values.dtype)
 
 
-def crop_pair_to_mosaic(netM, opt, origin_dir, mosaic_dir, outsize, ex_range=(1.2, 1.7)):
+EX_RANGE = (1.2, 1.7)    # crop margin around the mosaic, same range as the synthetic builder
+
+
+def crop_pair_to_mosaic(netM, opt, origin_dir, mosaic_dir, outsize, ex_mul=None):
     """Crop every frame of a pair to the mosaic region and resize to outsize x outsize.
 
     Extraction leaves FULL frames. The synthetic dataset (make_video_dataset.py)
@@ -133,7 +137,8 @@ def crop_pair_to_mosaic(netM, opt, origin_dir, mosaic_dir, outsize, ex_range=(1.
     for c in range(3):
         pos[:, c] = _edge_median(pos[:, c], win)
 
-    ex_mul = random.uniform(*ex_range)               # same margin range as the synthetic builder
+    if ex_mul is None:
+        ex_mul = random.uniform(*EX_RANGE)
     sides, size_mismatch = [], False
     for i, name in enumerate(names):
         mosaic = impro.imread(os.path.join(mosaic_dir, name))
@@ -164,7 +169,10 @@ def extract_frames(videopath, out_dir, fps):
     ffmpeg_util.video2image(videopath, os.path.join(out_dir, '%05d.jpg'), fps=fps)
 
 
-def detect_pct(opt, netM, censored_video, n_samples, min_pct, max_pct):
+def detect_pct(opt, netM, censored_video, n_samples, min_pct, max_pct, ex_mul=1.45, outsize=572):
+    """Block size as a % of the network input, for the crop crop_pair_to_mosaic will make
+    (half-width = detected size x ex_mul, stored at outsize, trained on as a finesize crop)."""
+    finesize = max(1, int(round(outsize * 256 / 286.0)))
     cap = cv2.VideoCapture(censored_video)
     if not cap.isOpened():
         return None
@@ -182,14 +190,15 @@ def detect_pct(opt, netM, censored_video, n_samples, min_pct, max_pct):
         mask, x, y, size = runmodel.get_mosaic_position(frame, netM, opt)
         if mask is None or size <= getattr(opt, 'min_mosaic_size', 100):
             continue
-        pairs.append((frame, mask))
+        h, w = frame.shape[:2]
+        half = max(8, min(int(size * ex_mul), h // 2, w // 2))
+        pairs.append((frame, mask, 2 * half))
     cap.release()
     if not pairs:
         return None
-    result = mosaic_util.estimate_mosaic_block_pct_multi(
+    return mosaic_util.estimate_crop_pct_multi(
         pairs, min_confidence=getattr(opt, 'auto_model_min_confidence', 0.15),
-        min_pct=min_pct, max_pct=max_pct)
-    return result
+        min_pct=min_pct, max_pct=max_pct, scale=outsize / float(finesize))
 
 
 def maybe_reuse_uncensored(pairs, mode, synthetic_source_dir):
@@ -297,7 +306,9 @@ def main():
     results = []
     for name, censored_path, uncensored_path in pairs:
         print(f"\n--- {name} ---")
-        result = detect_pct(opt, netM, censored_path, known.n_samples, min_pct, max_pct)
+        ex_mul = random.uniform(*EX_RANGE)
+        result = detect_pct(opt, netM, censored_path, known.n_samples, min_pct, max_pct,
+                            ex_mul=ex_mul, outsize=known.outsize)
         if result is None:
             print(f"  Could not confidently detect mosaic size, skipping. "
                   f"(Check the clip actually contains a detectable mosaic.)")
@@ -306,7 +317,7 @@ def main():
         note = ""
         if result['n_nonsquare'] > 0:
             note = f"  ({result['n_nonsquare']}/{result['n_samples']} samples non-square)"
-        print(f"  detected pct={result['pct']:.2f}%  confidence={result['confidence']:.2f}{note}  -> bucket {bucket:g}%")
+        print(f"  block ~{result['pct']:.1f}% of the training crop ({result['frame_pct']:.2f}% of the frame)  confidence={result['confidence']:.2f}{note}  -> bucket {bucket:g}%")
 
         bucket_dir = os.path.join(known.output_dir, f'bucket_{bucket:g}', name)
         origin_dir = os.path.join(bucket_dir, 'origin_image')
@@ -323,7 +334,7 @@ def main():
                   f"is suspect; recommend checking manually before training on it. **")
 
         if not known.no_crop:
-            stats = crop_pair_to_mosaic(netM, opt, origin_dir, mosaic_dir, known.outsize)
+            stats = crop_pair_to_mosaic(netM, opt, origin_dir, mosaic_dir, known.outsize, ex_mul=ex_mul)
             if stats is None:
                 print("  could not locate the mosaic in this pair's frames -- skipping it")
                 shutil.rmtree(bucket_dir, ignore_errors=True)

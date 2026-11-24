@@ -79,8 +79,16 @@ def link_or_copy(src, dst):
     shutil.copytree(src, dst)
 
 
+SINGLE_SAVENAME = 'clean_single'
+
+
+def savename_for(bucket):
+    return SINGLE_SAVENAME if bucket is None else f'clean_{bucket}pct'
+
+
 def build_merged_dataset(work_dir, bucket_label, synthetic_dataset, real_pairs_dataset):
-    merged_dir = os.path.join(work_dir, f'bucket_{bucket_label}_merged')
+    """bucket_label None = single-model mode: the pool plus the real pairs of EVERY bucket."""
+    merged_dir = os.path.join(work_dir, 'single_merged' if bucket_label is None else f'bucket_{bucket_label}_merged')
     os.makedirs(merged_dir, exist_ok=True)
 
     n_synth = 0
@@ -92,14 +100,22 @@ def build_merged_dataset(work_dir, bucket_label, synthetic_dataset, real_pairs_d
                 n_synth += 1
 
     n_real = 0
-    if real_pairs_dataset:
-        bucket_dir = os.path.join(real_pairs_dataset, f'bucket_{bucket_label}')
-        if os.path.isdir(bucket_dir):
+    if real_pairs_dataset and os.path.isdir(real_pairs_dataset):
+        if bucket_label is None:
+            bucket_dirs = sorted(d for d in os.listdir(real_pairs_dataset)
+                                 if d.startswith('bucket_') and os.path.isdir(os.path.join(real_pairs_dataset, d)))
+        else:
+            bucket_dirs = [f'bucket_{bucket_label}']
+        for bdir in bucket_dirs:
+            bucket_dir = os.path.join(real_pairs_dataset, bdir)
+            if not os.path.isdir(bucket_dir):
+                continue
             for name in os.listdir(bucket_dir):
                 src = os.path.join(bucket_dir, name)
                 if os.path.isdir(src):
-                    # prefix to avoid name collisions with synthetic folders
-                    link_or_copy(src, os.path.join(merged_dir, f'realpair_{name}'))
+                    # prefix to avoid name collisions with synthetic folders (and between buckets)
+                    tag = f'realpair_{bdir}_{name}' if bucket_label is None else f'realpair_{name}'
+                    link_or_copy(src, os.path.join(merged_dir, tag))
                     n_real += 1
 
     return merged_dir, n_synth, n_real
@@ -184,38 +200,45 @@ def main():
              'so a run that was interrupted continues with the first unfinished bucket)')
     parser.add_argument('--no_resume', action='store_true',
         help='train an unfinished bucket from the start instead of resuming it from its newest checkpoint')
+    parser.add_argument('--single', action='store_true',
+        help='original DeepMosaics training: ONE model (checkpoints/clean_single) from the whole pool plus the '
+             'real pairs of all buckets, with the original wide random mosaic sizes. No size manifest needed.')
     parser.add_argument('--dry_run', action='store_true', help='build merged folders and print commands, but do not actually launch training')
     args, train_args = parser.parse_known_args()
     if train_args and train_args[0] == '--':
         train_args = train_args[1:]
 
-    if not os.path.exists(args.model_manifest):
-        print(f"--model_manifest not found at {args.model_manifest}")
-        sys.exit(1)
-    with open(args.model_manifest) as f:
-        manifest = json.load(f)
-    bucket_labels = list(manifest.keys())
-    if args.buckets:
-        wanted = set(args.buckets.split(','))
-        bucket_labels = [b for b in bucket_labels if b in wanted]
+    if args.single:
+        bucket_labels = [None]
+    else:
+        if not os.path.exists(args.model_manifest):
+            print(f"--model_manifest not found at {args.model_manifest}")
+            sys.exit(1)
+        with open(args.model_manifest) as f:
+            manifest = json.load(f)
+        bucket_labels = list(manifest.keys())
+        if args.buckets:
+            wanted = set(args.buckets.split(','))
+            bucket_labels = [b for b in bucket_labels if b in wanted]
 
     if not args.synthetic_dataset and not args.real_pairs_dataset:
         print("Provide at least one of --synthetic_dataset or --real_pairs_dataset.")
         sys.exit(1)
 
-    print(f"Buckets to train: {bucket_labels}")
+    print("Training one model (single mode, no size buckets)." if args.single else f"Buckets to train: {bucket_labels}")
     os.makedirs(args.work_dir, exist_ok=True)
 
     for bucket in bucket_labels:
-        print(f"\n=== Bucket {bucket}% ===")
-        done, detail = bucket_finished(f'clean_{bucket}pct')
+        savename = savename_for(bucket)
+        print("\n=== Single model ===" if bucket is None else f"\n=== Bucket {bucket}% ===")
+        done, detail = bucket_finished(savename)
         if done and not args.redo_finished:
             print(f"  Already finished ({detail}); skipping. Tick 'Train finished buckets again' (or pass --redo_finished) to train it again.",
                   flush=True)
             continue
         resume = False
         if not args.redo_finished and not args.no_resume:
-            ck = os.path.join(ROOT, 'checkpoints', f'clean_{bucket}pct')
+            ck = os.path.join(ROOT, 'checkpoints', savename)
             resume = os.path.isdir(ck) and any(n.endswith('_G.pth') for n in os.listdir(ck))
         if detail:
             print(f"  Not finished yet: {detail}. " + ("Resuming from its newest checkpoint." if resume else "Training it from the start."),
@@ -228,13 +251,12 @@ def main():
             print(f"  no data for this bucket at all, skipping.")
             continue
 
-        savename = f'clean_{bucket}pct'
         cmd = [resolve_python_exe(), args.train_script,
                '--dataset', merged_dir,
                '--savename', savename]
         # Only pass --dataset_mosaic_pct if there's synthetic data to constrain —
         # harmless either way, but skip the noise if this bucket is real-pairs-only.
-        if n_synth > 0:
+        if n_synth > 0 and bucket is not None:
             cmd += ['--dataset_mosaic_pct', bucket]
         cmd += train_args
         if resume and '--continue_train' not in cmd:
@@ -296,7 +318,7 @@ def main():
             code = process.returncode
             if code != 0:
                 took = time.time() - started
-                lines = [f"\n  ** Training for bucket {bucket}% FAILED after {took:.0f}s. Exit code {diagnose.explain_exit(code)}"]
+                lines = [f"\n  ** Training for " + ("the single model" if bucket is None else f"bucket {bucket}%") + f" FAILED after {took:.0f}s. Exit code {diagnose.explain_exit(code)}"]
                 if printed == 0:
                     lines.append("  ** It printed nothing at all, so Python itself could not start or was stopped at once. "
                                  "Check that this Python works: run it in a terminal with:  "
@@ -314,6 +336,11 @@ def main():
         if code != 0:
             sys.exit(code if 0 < code < 256 else 1)
 
+    if args.single:
+        print(f"\nDone. The model is in checkpoints/{SINGLE_SAVENAME}/: the highest-numbered _G.pth with its .json. "
+              "'Install trained models' in the dataset tool copies it to pretrained_models/clean_single.pth; "
+              "keep the .json beside it so the program runs it at the size it was trained at.")
+        return
     print("\nDone. Trained checkpoints are under checkpoints/<savename>/ as usual for train/clean/train.py — "
           "pick the checkpoint you want per bucket and copy/rename it into your --model_manifest's expected "
           "path (e.g. pretrained_models/mosaic/clean_1pct.pth). Copy the matching .json too "

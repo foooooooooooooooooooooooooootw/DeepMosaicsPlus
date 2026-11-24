@@ -82,7 +82,7 @@ class Options():
 
         #Auto model selection by detected mosaic size (experimental, opt-in)
         self.parser.add_argument('--auto_model', action='store_true',
-            help='EXPERIMENTAL: detect the mosaic block size (as %% of frame short side) and '
+            help='EXPERIMENTAL: detect the mosaic block size (as %% of the square the model is fed: the crop around the mosaic area) and '
                  'automatically pick the matching pretrained model from --model_manifest, instead '
                  'of always using --model_path. AI clean mode only (ignored with --traditional). '
                  'Falls back to --model_path on a low-confidence detection or any error.')

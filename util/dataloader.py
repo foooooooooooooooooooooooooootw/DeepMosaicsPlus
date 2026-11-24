@@ -39,7 +39,7 @@ class VideoLoader(object):
             feg_ori =  impro.imread(os.path.join(video_dir,'origin_image','00001.jpg'),loadsize=self.opt.loadsize,rgb=True)
             feg_mask = impro.imread(os.path.join(video_dir,'mask','00001.png'),mod='gray',loadsize=self.opt.loadsize)
             target_pct = getattr(opt, 'dataset_mosaic_pct', None)
-            self.mosaic_size,self.mod,self.rect_rat,self.feather = mosaic.get_random_parameter(feg_ori,feg_mask,target_pct=target_pct)
+            self.mosaic_size,self.mod,self.rect_rat,self.feather = mosaic.get_random_parameter(feg_ori,feg_mask,target_pct=target_pct,finesize=getattr(self.opt,'finesize',None))
             self.startpos = [random.randint(0,self.mosaic_size),random.randint(0,self.mosaic_size)]
         #Init load pool
         for i in range(self.opt.S*self.opt.T):

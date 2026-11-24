@@ -217,6 +217,49 @@ def estimate_mosaic_block_pct_multi(frame_mask_pairs, min_confidence=0.15, min_p
     }
 
 
+def estimate_crop_pct_multi(samples, min_confidence=0.15, min_pct=None, max_pct=None, scale=1.0, par=1.0):
+    """Mosaic block size as a % of the square crop the clean network is fed -- the unit
+    size buckets use (--auto_model, bucket_real_pairs.py, --dataset_mosaic_pct).
+
+    The cleaner cuts a square around the mosaic area and resizes it to the network's input
+    size, so what the network sees is block_px / crop_side, NOT block_px / frame size: the
+    same 4%-of-the-frame mosaic is ~2x larger to the network when the mosaic area is half
+    as big. Buckets measured against the frame therefore sent videos to models trained on
+    much smaller blocks (result: smoothed block edges, no detail).
+
+    samples: (img, mask, crop_side_px) per frame. scale: extra factor from the crop to the
+    network input (1.0 at inference; outsize/finesize for training clips that are stored at
+    outsize and randomly cropped to finesize). min_pct/max_pct: bucket range in crop %;
+    the search looks somewhat beyond it (selection clamps to the nearest bucket), but not
+    so far down that video-compression patterns are mistaken for blocks.
+    Returns {'pct', 'frame_pct', 'crop_side', 'confidence', 'n_samples', 'n_square',
+    'n_nonsquare'} (medians) or None."""
+    estimates = []
+    for img, mask, side in samples:
+        if img is None or mask is None or not side or side <= 0:
+            continue
+        short = float(min(img.shape[:2]))
+        to_frame = side / (short * scale)             # frame % = crop % * to_frame
+        lo = min_pct * 0.7 * to_frame if min_pct else None
+        hi = max_pct * 2.0 * to_frame if max_pct else None
+        max_block = max(128, int(np.ceil(hi * short / 100.0)) + 2) if hi else 128
+        try:
+            est = estimate_mosaic_block_pct(img, mask, max_block_px=max_block, min_pct=lo, max_pct=hi, par=par)
+        except Exception:
+            est = None
+        if est is None or est['confidence'] < min_confidence:
+            continue
+        estimates.append((est['pct'] * short / side * scale, est['pct'], side, est))
+    if not estimates:
+        return None
+    n_square = sum(1 for e in estimates if e[3]['is_square'])
+    return {'pct': float(np.median([e[0] for e in estimates])),
+            'frame_pct': float(np.median([e[1] for e in estimates])),
+            'crop_side': float(np.median([e[2] for e in estimates])),
+            'confidence': float(np.median([e[3]['confidence'] for e in estimates])),
+            'n_samples': len(estimates), 'n_square': n_square, 'n_nonsquare': len(estimates) - n_square}
+
+
 def addmosaic(img,mask,opt):
     if opt.mosaic_mod == 'random':
         img = addmosaic_random(img,mask)
@@ -333,19 +376,19 @@ def get_autosize(img,mask,area_type = 'normal'):
         pass
     return size
 
-def get_random_parameter(img,mask,target_pct=None):
+def get_random_parameter(img,mask,target_pct=None,finesize=None):
     # mosaic size
     if target_pct is not None:
-        # Constrain to a narrow band around a specific bucket size (e.g. for
-        # training a size-specialized model — see --dataset_mosaic_pct in
-        # train/clean/train.py), rather than the wide free-ranging default
-        # below. Size is computed relative to this image's own shorter side,
-        # matching the same convention used by the --auto_model detector
-        # (util.mosaic.estimate_mosaic_block_pct), so a model trained this
-        # way stays calibrated with how it'll be selected at inference time.
+        # Constrain to a band around a specific bucket size (training a size-specialized
+        # model -- see --dataset_mosaic_pct in train/clean/train.py) instead of the wide
+        # free-ranging default below.
+        # Bucket unit: % of the network's input (finesize), the same unit the cleaner measures
+        # in (estimate_crop_pct_multi). Frames are stored at loadsize and cropped to finesize
+        # without resizing, so block px here = block px the network sees. The wide range makes
+        # neighbouring buckets overlap, so a model copes with sizes between buckets.
         h, w = img.shape[:2]
-        base_px = target_pct / 100.0 * min(h, w)
-        mosaic_size = int(base_px * random.uniform(0.85, 1.15))
+        base_px = target_pct / 100.0 * (finesize if finesize else min(h, w))
+        mosaic_size = int(base_px * random.uniform(0.75, 1.33))
         mosaic_size = max(2, mosaic_size)
     else:
         p = np.array([0.5,0.5])

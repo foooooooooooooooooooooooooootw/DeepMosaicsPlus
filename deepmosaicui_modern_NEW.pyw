@@ -1049,6 +1049,17 @@ class MainWindow(QMainWindow):
             "since models without a .json are the original 256px models.\n"
             "Models trained here at 512 get a .json, so Auto runs them at 512 (about 4x the time and memory of 256).")
         sb.addLayout(_row(_rl("Model input size"), self.infer_size_sel, None))
+        self.auto_model_cb = QCheckBox("Auto-select model by mosaic size")
+        self.auto_model_cb.setToolTip(
+            "Measure the mosaic block size in the video and use the bucket model trained for it\n"
+            "(pretrained_models/mosaic/size_manifest.json; the training tool's 'Install trained models'\n"
+            "button puts your models there). The Model above is used when the size can't be measured.")
+        self.auto_model_hint = _hint("")
+        self.auto_model_hint.setWordWrap(True)
+        self.auto_model_hint.setVisible(False)
+        self.auto_model_cb.toggled.connect(self._update_auto_model_hint)
+        sb.addWidget(self.auto_model_cb)
+        sb.addWidget(self.auto_model_hint)
 
         # Result
         self.result_in = _inp("Output folder…", "./result")
@@ -1287,6 +1298,34 @@ class MainWindow(QMainWindow):
                 return candidate
         return exe
 
+    def _update_auto_model_hint(self, checked=None):
+        """Under the checkbox: how many bucket models the manifest points at actually exist."""
+        if not self.auto_model_cb.isChecked():
+            self.auto_model_hint.setVisible(False)
+            return
+        import json
+        here = os.path.dirname(os.path.abspath(__file__))
+        manifest = os.path.join(here, 'pretrained_models', 'mosaic', 'size_manifest.json')
+        try:
+            with open(manifest, encoding='utf-8') as f:
+                entries = json.load(f)
+            base = os.path.dirname(manifest)
+            missing = [k for k, v in entries.items()
+                       if not os.path.isfile(v if os.path.isabs(v) else os.path.join(base, v))]
+            found = len(entries) - len(missing)
+            if not missing:
+                text = f"{found} bucket models found ({', '.join(str(k) + '%' for k in entries)})."
+            elif found:
+                text = (f"{found} of {len(entries)} bucket models found; missing: "
+                        f"{', '.join(str(k) + '%' for k in missing)}. Missing buckets use the nearest installed one.")
+            else:
+                text = ("No bucket models installed yet. Use 'Install trained models' in the training tool, "
+                        "or copy them into pretrained_models/mosaic.")
+        except Exception:
+            text = "pretrained_models/mosaic/size_manifest.json is missing or unreadable."
+        self.auto_model_hint.setText(text)
+        self.auto_model_hint.setVisible(True)
+
     def _generate_command(self):
         cmd = [self._python_exe(), "deepmosaic.py"]
 
@@ -1350,6 +1389,7 @@ class MainWindow(QMainWindow):
             if dn and dn != "10":          cmd.extend(["--tr_down", dn])
         if self.no_feather_cb.isChecked(): cmd.append("--no_feather")
         if self.fp16_cb.isChecked(): cmd.append("--fp16")
+        if self.auto_model_cb.isChecked(): cmd.append("--auto_model")
         if self.all_mosaic_cb.isChecked(): cmd.append("--all_mosaic_area")
         ma = self.min_area_in.text().strip()
         if ma and ma != "300":             cmd.extend(["--min_mosaic_area", ma])
