@@ -11,7 +11,7 @@ class Options():
     def initialize(self):
 
         #base
-        self.parser.add_argument('--version', action='version', version='DeepMosaicsPlus 1.3.0 (fork of DeepMosaics 0.5.1)')
+        self.parser.add_argument('--version', action='version', version='DeepMosaicsPlus 1.3.1 (fork of DeepMosaics 0.5.1)')
         self.parser.add_argument('--debug', action='store_true', help='if specified, start debug mode')
         self.parser.add_argument('--gpu_id', type=str,default='0', help='if -1, use cpu')
         self.parser.add_argument('--media_path', type=str, default='./imgs/ruoruo.jpg',help='your videos or images path')

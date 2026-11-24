@@ -449,7 +449,7 @@ class DatasetPrepWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DeepMosaicsPlus 1.3.0 — Dataset & Training")
+        self.setWindowTitle("DeepMosaicsPlus 1.3.1 — Dataset & Training")
         self.resize(1360, 860)
         self.cfg = load_config()
         self._process = None

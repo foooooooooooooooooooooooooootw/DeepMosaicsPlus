@@ -1,5 +1,5 @@
 """
-DeepMosaicsPlus 1.3.0 — Modern 3-panel workstation UI
+DeepMosaicsPlus 1.3.1 — Modern 3-panel workstation UI
 Layout: Left sidebar (config) · Centre (frame viewport) · Bottom (run bar + log)
 
 Run with:  python deepmosaicui_qt2.py
@@ -737,7 +737,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DeepMosaicsPlus 1.3.0")
+        self.setWindowTitle("DeepMosaicsPlus 1.3.1")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(1100, 700)
         self.resize(1280, 820)
@@ -799,7 +799,7 @@ class MainWindow(QMainWindow):
         )
         tb.addWidget(app_lbl)
 
-        ver_lbl = QLabel("v1.3.0")
+        ver_lbl = QLabel("v1.3.1")
         ver_lbl.setStyleSheet(
             f"font-size: 11px; color: {C['text_dim']}; background: transparent;"
             f" margin-left: 6px;"
@@ -2086,7 +2086,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DeepMosaicsPlus")
-    app.setApplicationVersion("1.3.0")
+    app.setApplicationVersion("1.3.1")
     app.setStyleSheet(QSS)
     for family in ("Inter", "Segoe UI", "SF Pro Text", "Helvetica Neue"):
         if family in QFontDatabase.families():

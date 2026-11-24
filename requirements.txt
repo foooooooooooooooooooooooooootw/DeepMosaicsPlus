@@ -1,4 +1,4 @@
-# DeepMosaicsPlus 1.3.0 - Python dependencies
+# DeepMosaicsPlus 1.3.1 - Python dependencies
 #
 # PyTorch is NOT listed here: the right build depends on your GPU, and pip
 # cannot pick it automatically. The easiest way is to run install_script.py,
